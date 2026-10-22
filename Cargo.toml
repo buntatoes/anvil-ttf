@@ -1,10 +1,10 @@
 [package]
 name = "flux-ttf"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 authors = ["Buntos <324143321+buntatoes@users.noreply.github.com>"]
 license = "MPL-2.0"
-description = "TrueType and OpenType SFNT font table parser and proportional text metrics engine."
+description = "TrueType and OpenType SFNT font table parser, glyph outline decoder, and anti-aliased scanline rasterizer."
 repository = "https://github.com/buntatoes/flux-ttf"
 homepage = "https://github.com/buntatoes/flux-ttf"
 readme = "README.md"

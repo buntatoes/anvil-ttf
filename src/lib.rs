@@ -1,4 +1,4 @@
-//! Proprietary TrueType/OpenType SFNT font parser and proportional text metrics engine.
+//! Proprietary TrueType/OpenType SFNT font parser, glyph outline decoder, and anti-aliased rasterizer.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -30,6 +30,32 @@ pub struct HMetric {
     pub left_side_bearing: i16,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OutlinePoint {
+    pub x: i16,
+    pub y: i16,
+    pub on_curve: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct GlyphOutline {
+    pub x_min: i16,
+    pub y_min: i16,
+    pub x_max: i16,
+    pub y_max: i16,
+    pub contours: Vec<Vec<OutlinePoint>>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct GlyphBitmap {
+    pub width: u32,
+    pub height: u32,
+    pub bearing_x: i32,
+    pub bearing_y: i32,
+    pub advance_px: f32,
+    pub coverage: Vec<u8>,
+}
+
 #[derive(Clone, Debug)]
 pub struct TtfFont {
     pub units_per_em: u16,
@@ -39,6 +65,7 @@ pub struct TtfFont {
     cmap: HashMap<u32, u16>,
     metrics: Vec<HMetric>,
     kern_pairs: HashMap<(u16, u16), i16>,
+    outlines: Vec<Option<GlyphOutline>>,
 }
 
 impl TtfFont {
@@ -81,6 +108,7 @@ impl TtfFont {
         if units_per_em == 0 {
             return Err(TtfError::InvalidTable("head"));
         }
+        let index_to_loc_format = read_i16_be(head, 50)?;
 
         let hhea = slice_table(bytes, &tables, b"hhea", "hhea")?;
         if hhea.len() < 36 {
@@ -109,6 +137,17 @@ impl TtfFont {
             HashMap::new()
         };
 
+        let outlines = if let (Some(&(loca_off, loca_len)), Some(&(glyf_off, glyf_len))) =
+            (tables.get(b"loca"), tables.get(b"glyf"))
+        {
+            let loca_slice = &bytes[loca_off..loca_off + loca_len];
+            let glyf_slice = &bytes[glyf_off..glyf_off + glyf_len];
+            parse_glyf_table(loca_slice, glyf_slice, num_glyphs, index_to_loc_format)
+                .unwrap_or_else(|_| vec![None; num_glyphs])
+        } else {
+            vec![None; num_glyphs]
+        };
+
         Ok(Self {
             units_per_em,
             ascender,
@@ -117,6 +156,7 @@ impl TtfFont {
             cmap,
             metrics,
             kern_pairs,
+            outlines,
         })
     }
 
@@ -186,6 +226,25 @@ impl TtfFont {
     pub fn line_height_px(&self, font_size_px: f32) -> f32 {
         let units = i32::from(self.ascender) - i32::from(self.descender) + i32::from(self.line_gap);
         (units.max(i32::from(self.units_per_em)) as f32) * font_size_px / (self.units_per_em as f32)
+    }
+
+    /// Return the parsed [`GlyphOutline`] for `glyph_id` if present in the `glyf` table.
+    pub fn glyph_outline(&self, glyph_id: u16) -> Option<&GlyphOutline> {
+        self.outlines
+            .get(glyph_id as usize)
+            .and_then(|o| o.as_ref())
+    }
+
+    /// Rasterize the vector outline of `ch` at `font_size_px` using 4x4 supersampled scanlines.
+    pub fn rasterize_glyph(&self, ch: char, font_size_px: f32) -> Option<GlyphBitmap> {
+        let gid = self.glyph_id(ch);
+        let outline = self.glyph_outline(gid)?;
+        if outline.contours.is_empty() {
+            return None;
+        }
+        let scale = font_size_px.max(1.0) / (self.units_per_em.max(1) as f32);
+        let advance_px = (self.glyph_metric(gid).advance_width as f32) * scale;
+        rasterize_outline(outline, scale, advance_px)
     }
 }
 
@@ -423,14 +482,402 @@ fn read_u32_be(bytes: &[u8], offset: usize) -> Result<u32, TtfError> {
     Ok(u32::from_be_bytes([slice[0], slice[1], slice[2], slice[3]]))
 }
 
+fn parse_glyf_table(
+    loca: &[u8],
+    glyf: &[u8],
+    num_glyphs: usize,
+    index_to_loc_format: i16,
+) -> Result<Vec<Option<GlyphOutline>>, TtfError> {
+    let mut offsets = Vec::with_capacity(num_glyphs + 1);
+    if index_to_loc_format == 0 {
+        if loca.len() < (num_glyphs + 1) * 2 {
+            return Err(TtfError::InvalidTable("loca"));
+        }
+        for i in 0..=num_glyphs {
+            offsets.push((read_u16_be(loca, i * 2)? as usize) * 2);
+        }
+    } else {
+        if loca.len() < (num_glyphs + 1) * 4 {
+            return Err(TtfError::InvalidTable("loca"));
+        }
+        for i in 0..=num_glyphs {
+            offsets.push(read_u32_be(loca, i * 4)? as usize);
+        }
+    }
+
+    let mut outlines = Vec::with_capacity(num_glyphs);
+    for gid in 0..num_glyphs {
+        let start = offsets[gid];
+        let end = offsets[gid + 1];
+        if start >= end || end > glyf.len() {
+            outlines.push(None);
+            continue;
+        }
+        let slice = &glyf[start..end];
+        outlines.push(parse_single_glyph(slice, glyf, &offsets, 0).ok().flatten());
+    }
+    Ok(outlines)
+}
+
+fn parse_single_glyph(
+    slice: &[u8],
+    glyf: &[u8],
+    offsets: &[usize],
+    depth: u8,
+) -> Result<Option<GlyphOutline>, TtfError> {
+    if depth > 8 || slice.len() < 10 {
+        return Ok(None);
+    }
+    let num_contours = read_i16_be(slice, 0)?;
+    let x_min = read_i16_be(slice, 2)?;
+    let y_min = read_i16_be(slice, 4)?;
+    let x_max = read_i16_be(slice, 6)?;
+    let y_max = read_i16_be(slice, 8)?;
+
+    if num_contours == 0 {
+        return Ok(None);
+    }
+    if num_contours > 0 {
+        let contours = parse_simple_contours(&slice[10..], num_contours as usize)?;
+        Ok(Some(GlyphOutline {
+            x_min,
+            y_min,
+            x_max,
+            y_max,
+            contours,
+        }))
+    } else {
+        let contours = parse_compound_contours(&slice[10..], glyf, offsets, depth + 1)?;
+        Ok(Some(GlyphOutline {
+            x_min,
+            y_min,
+            x_max,
+            y_max,
+            contours,
+        }))
+    }
+}
+
+fn parse_simple_contours(
+    data: &[u8],
+    num_contours: usize,
+) -> Result<Vec<Vec<OutlinePoint>>, TtfError> {
+    if data.len() < num_contours * 2 + 2 {
+        return Err(TtfError::InvalidTable("glyf"));
+    }
+    let mut end_pts = Vec::with_capacity(num_contours);
+    for i in 0..num_contours {
+        end_pts.push(read_u16_be(data, i * 2)? as usize);
+    }
+    let total_pts = end_pts.last().copied().map(|p| p + 1).unwrap_or(0);
+    if total_pts == 0 {
+        return Ok(Vec::new());
+    }
+
+    let insn_len = read_u16_be(data, num_contours * 2)? as usize;
+    let mut pos = num_contours * 2 + 2 + insn_len;
+    if pos > data.len() {
+        return Err(TtfError::InvalidTable("glyf"));
+    }
+
+    let mut flags = Vec::with_capacity(total_pts);
+    while flags.len() < total_pts {
+        let f = *data.get(pos).ok_or(TtfError::UnexpectedEof)?;
+        pos += 1;
+        flags.push(f);
+        if (f & 0x08) != 0 {
+            let repeat = *data.get(pos).ok_or(TtfError::UnexpectedEof)? as usize;
+            pos += 1;
+            for _ in 0..repeat {
+                if flags.len() < total_pts {
+                    flags.push(f);
+                }
+            }
+        }
+    }
+
+    let mut xs = Vec::with_capacity(total_pts);
+    let mut cur_x: i16 = 0;
+    for &f in &flags {
+        let short = (f & 0x02) != 0;
+        let same_or_pos = (f & 0x10) != 0;
+        let dx = if short {
+            let b = i16::from(*data.get(pos).ok_or(TtfError::UnexpectedEof)?);
+            pos += 1;
+            if same_or_pos { b } else { -b }
+        } else if same_or_pos {
+            0
+        } else {
+            let v = read_i16_be(data, pos)?;
+            pos += 2;
+            v
+        };
+        cur_x = cur_x.wrapping_add(dx);
+        xs.push(cur_x);
+    }
+
+    let mut ys = Vec::with_capacity(total_pts);
+    let mut cur_y: i16 = 0;
+    for &f in &flags {
+        let short = (f & 0x04) != 0;
+        let same_or_pos = (f & 0x20) != 0;
+        let dy = if short {
+            let b = i16::from(*data.get(pos).ok_or(TtfError::UnexpectedEof)?);
+            pos += 1;
+            if same_or_pos { b } else { -b }
+        } else if same_or_pos {
+            0
+        } else {
+            let v = read_i16_be(data, pos)?;
+            pos += 2;
+            v
+        };
+        cur_y = cur_y.wrapping_add(dy);
+        ys.push(cur_y);
+    }
+
+    let mut contours = Vec::with_capacity(num_contours);
+    let mut start = 0usize;
+    for &end in &end_pts {
+        if end >= total_pts || end < start {
+            break;
+        }
+        let mut contour = Vec::with_capacity(end - start + 1);
+        for idx in start..=end {
+            contour.push(OutlinePoint {
+                x: xs[idx],
+                y: ys[idx],
+                on_curve: (flags[idx] & 0x01) != 0,
+            });
+        }
+        contours.push(contour);
+        start = end + 1;
+    }
+    Ok(contours)
+}
+
+fn parse_compound_contours(
+    data: &[u8],
+    glyf: &[u8],
+    offsets: &[usize],
+    depth: u8,
+) -> Result<Vec<Vec<OutlinePoint>>, TtfError> {
+    let mut pos = 0usize;
+    let mut all_contours = Vec::new();
+    loop {
+        if pos + 4 > data.len() {
+            break;
+        }
+        let flags = read_u16_be(data, pos)?;
+        let comp_gid = read_u16_be(data, pos + 2)? as usize;
+        pos += 4;
+
+        let args_words = (flags & 0x0001) != 0;
+        let args_xy = (flags & 0x0002) != 0;
+        let (dx, dy) = if args_words {
+            if pos + 4 > data.len() {
+                break;
+            }
+            let a1 = read_i16_be(data, pos)?;
+            let a2 = read_i16_be(data, pos + 2)?;
+            pos += 4;
+            if args_xy { (a1, a2) } else { (0, 0) }
+        } else {
+            if pos + 2 > data.len() {
+                break;
+            }
+            let a1 = i16::from(data[pos] as i8);
+            let a2 = i16::from(data[pos + 1] as i8);
+            pos += 2;
+            if args_xy { (a1, a2) } else { (0, 0) }
+        };
+
+        if (flags & 0x0008) != 0 {
+            pos += 2;
+        } else if (flags & 0x0040) != 0 {
+            pos += 4;
+        } else if (flags & 0x0080) != 0 {
+            pos += 8;
+        }
+
+        if comp_gid + 1 < offsets.len() {
+            let c_start = offsets[comp_gid];
+            let c_end = offsets[comp_gid + 1];
+            if c_start < c_end && c_end <= glyf.len() {
+                if let Ok(Some(sub)) =
+                    parse_single_glyph(&glyf[c_start..c_end], glyf, offsets, depth)
+                {
+                    for contour in sub.contours {
+                        let shifted = contour
+                            .into_iter()
+                            .map(|pt| OutlinePoint {
+                                x: pt.x.wrapping_add(dx),
+                                y: pt.y.wrapping_add(dy),
+                                on_curve: pt.on_curve,
+                            })
+                            .collect();
+                        all_contours.push(shifted);
+                    }
+                }
+            }
+        }
+
+        if (flags & 0x0020) == 0 {
+            break;
+        }
+    }
+    Ok(all_contours)
+}
+
+fn flatten_contour(points: &[OutlinePoint], scale: f32) -> Vec<(f32, f32)> {
+    if points.len() < 2 {
+        return Vec::new();
+    }
+    let mut expanded: Vec<(f32, f32, bool)> = Vec::new();
+    let n = points.len();
+    for i in 0..n {
+        let cur = points[i];
+        let next = points[(i + 1) % n];
+        let cx = (cur.x as f32) * scale;
+        let cy = -(cur.y as f32) * scale;
+        expanded.push((cx, cy, cur.on_curve));
+        if !cur.on_curve && !next.on_curve {
+            let nx = (next.x as f32) * scale;
+            let ny = -(next.y as f32) * scale;
+            expanded.push(((cx + nx) * 0.5, (cy + ny) * 0.5, true));
+        }
+    }
+
+    let first_on = expanded.iter().position(|p| p.2).unwrap_or(0);
+    let mut poly = Vec::new();
+    let len = expanded.len();
+    let mut idx = 0usize;
+    while idx < len {
+        let p0 = expanded[(first_on + idx) % len];
+        let p1 = expanded[(first_on + idx + 1) % len];
+        if p1.2 {
+            poly.push((p0.0, p0.1));
+            idx += 1;
+        } else {
+            let p2 = expanded[(first_on + idx + 2) % len];
+            let steps = 6usize;
+            for s in 0..steps {
+                let t = (s as f32) / (steps as f32);
+                let inv = 1.0 - t;
+                let x = inv * inv * p0.0 + 2.0 * inv * t * p1.0 + t * t * p2.0;
+                let y = inv * inv * p0.1 + 2.0 * inv * t * p1.1 + t * t * p2.1;
+                poly.push((x, y));
+            }
+            idx += 2;
+        }
+    }
+    poly
+}
+
+fn rasterize_outline(outline: &GlyphOutline, scale: f32, advance_px: f32) -> Option<GlyphBitmap> {
+    let mut segments: Vec<((f32, f32), (f32, f32))> = Vec::new();
+    let mut min_x = f32::INFINITY;
+    let mut min_y = f32::INFINITY;
+    let mut max_x = f32::NEG_INFINITY;
+    let mut max_y = f32::NEG_INFINITY;
+
+    for contour in &outline.contours {
+        let poly = flatten_contour(contour, scale);
+        if poly.len() < 2 {
+            continue;
+        }
+        for i in 0..poly.len() {
+            let a = poly[i];
+            let b = poly[(i + 1) % poly.len()];
+            min_x = min_x.min(a.0).min(b.0);
+            min_y = min_y.min(a.1).min(b.1);
+            max_x = max_x.max(a.0).max(b.0);
+            max_y = max_y.max(a.1).max(b.1);
+            if (a.1 - b.1).abs() > 1e-5 {
+                segments.push((a, b));
+            }
+        }
+    }
+    if segments.is_empty() || !min_x.is_finite() {
+        return None;
+    }
+
+    let x0 = min_x.floor() as i32;
+    let y0 = min_y.floor() as i32;
+    let x1 = max_x.ceil() as i32;
+    let y1 = max_y.ceil() as i32;
+    let width = (x1 - x0).max(1) as u32;
+    let height = (y1 - y0).max(1) as u32;
+    if width > 512 || height > 512 {
+        return None;
+    }
+
+    let mut coverage = vec![0u8; (width * height) as usize];
+    const SUB: usize = 4;
+
+    for py in 0..height {
+        let mut row_hits = vec![0u8; width as usize];
+        for sy in 0..SUB {
+            let sample_y = (y0 as f32) + (py as f32) + ((sy as f32) + 0.5) / (SUB as f32);
+            let mut crossings: Vec<(f32, i32)> = Vec::new();
+            for &(a, b) in &segments {
+                let (ymin, ymax, dir) = if a.1 < b.1 {
+                    (a.1, b.1, 1)
+                } else {
+                    (b.1, a.1, -1)
+                };
+                if sample_y >= ymin && sample_y < ymax {
+                    let t = (sample_y - a.1) / (b.1 - a.1);
+                    let ix = a.0 + t * (b.0 - a.0);
+                    crossings.push((ix, dir));
+                }
+            }
+            if crossings.is_empty() {
+                continue;
+            }
+            crossings.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+            for px in 0..width {
+                for sx in 0..SUB {
+                    let sample_x = (x0 as f32) + (px as f32) + ((sx as f32) + 0.5) / (SUB as f32);
+                    let mut winding = 0i32;
+                    for &(cx, dir) in &crossings {
+                        if cx <= sample_x {
+                            winding += dir;
+                        } else {
+                            break;
+                        }
+                    }
+                    if winding != 0 {
+                        row_hits[px as usize] += 1;
+                    }
+                }
+            }
+        }
+        for px in 0..width {
+            let hits = u32::from(row_hits[px as usize]);
+            coverage[(py * width + px) as usize] = ((hits * 255 + 8) / 16).min(255) as u8;
+        }
+    }
+
+    Some(GlyphBitmap {
+        width,
+        height,
+        bearing_x: x0,
+        bearing_y: -y0,
+        advance_px,
+        coverage,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn build_minimal_synthetic_ttf() -> Vec<u8> {
-        // Minimal valid SFNT with 5 tables: cmap, head, hhea, hmtx, maxp
         let mut head = vec![0u8; 54];
         head[18..20].copy_from_slice(&1000u16.to_be_bytes()); // unitsPerEm = 1000
+        head[50..52].copy_from_slice(&1i16.to_be_bytes()); // indexToLocFormat = 1 (u32 offsets)
 
         let mut hhea = vec![0u8; 36];
         hhea[4..6].copy_from_slice(&800i16.to_be_bytes()); // ascender
@@ -447,6 +894,36 @@ mod tests {
             hmtx.extend_from_slice(&adv.to_be_bytes());
             hmtx.extend_from_slice(&lsb.to_be_bytes());
         }
+
+        // Build simple rectangular contour for Glyph 1 ('A'): 4 on-curve points (0,0)->(600,0)->(600,700)->(0,700)
+        let mut glyf = Vec::new();
+        glyf.extend_from_slice(&1i16.to_be_bytes()); // numberOfContours = 1
+        glyf.extend_from_slice(&0i16.to_be_bytes()); // xMin
+        glyf.extend_from_slice(&0i16.to_be_bytes()); // yMin
+        glyf.extend_from_slice(&600i16.to_be_bytes()); // xMax
+        glyf.extend_from_slice(&700i16.to_be_bytes()); // yMax
+        glyf.extend_from_slice(&3u16.to_be_bytes()); // endPtsOfContours[0] = 3
+        glyf.extend_from_slice(&0u16.to_be_bytes()); // instructionLength = 0
+        // 4 points, all on-curve (0x01), 2-byte signed deltas (0x00)
+        for _ in 0..4 {
+            glyf.push(0x01);
+        }
+        // X deltas: +0, +600, +0, -600
+        for &dx in &[0i16, 600, 0, -600] {
+            glyf.extend_from_slice(&dx.to_be_bytes());
+        }
+        // Y deltas: +0, +0, +700, -700
+        for &dy in &[0i16, 0, 700, -700] {
+            glyf.extend_from_slice(&dy.to_be_bytes());
+        }
+        let glyph1_len = glyf.len() as u32;
+
+        // loca (format 1, 4 u32 entries for 3 glyphs): glyph 0 empty (0..0), glyph 1 (0..glyph1_len), glyph 2 empty
+        let mut loca = Vec::new();
+        loca.extend_from_slice(&0u32.to_be_bytes());
+        loca.extend_from_slice(&0u32.to_be_bytes());
+        loca.extend_from_slice(&glyph1_len.to_be_bytes());
+        loca.extend_from_slice(&glyph1_len.to_be_bytes());
 
         // cmap with 1 Format 12 subtable (platform 3, encoding 10)
         let mut cmap = Vec::new();
@@ -470,11 +947,13 @@ mod tests {
         cmap.extend_from_slice(&105u32.to_be_bytes());
         cmap.extend_from_slice(&2u32.to_be_bytes());
 
-        let tables: [(&[u8; 4], &[u8]); 5] = [
+        let tables: [(&[u8; 4], &[u8]); 7] = [
             (b"cmap", &cmap),
+            (b"glyf", &glyf),
             (b"head", &head),
             (b"hhea", &hhea),
             (b"hmtx", &hmtx),
+            (b"loca", &loca),
             (b"maxp", &maxp),
         ];
 
@@ -516,5 +995,18 @@ mod tests {
         let narrow = measure_proportional_fallback("iiii", 16.0);
         let wide = measure_proportional_fallback("MMMM", 16.0);
         assert!(wide > narrow * 2.0);
+    }
+
+    #[test]
+    fn parses_glyf_outlines_and_rasterizes_coverage_bitmap() {
+        let bytes = build_minimal_synthetic_ttf();
+        let font = TtfFont::parse(&bytes).unwrap();
+        let outline = font.glyph_outline(1).expect("glyph 1 outline");
+        assert_eq!(outline.contours.len(), 1);
+        assert_eq!(outline.contours[0].len(), 4);
+
+        let bitmap = font.rasterize_glyph('A', 20.0).expect("rasterized A");
+        assert!(bitmap.width >= 10 && bitmap.height >= 12);
+        assert!(bitmap.coverage.iter().any(|&alpha| alpha == 255));
     }
 }
