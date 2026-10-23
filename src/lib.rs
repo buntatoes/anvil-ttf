@@ -1,4 +1,6 @@
-//! Proprietary TrueType/OpenType SFNT font parser, glyph outline decoder, and anti-aliased rasterizer.
+//! TrueType/OpenType SFNT font parser, glyph outline decoder, and anti-aliased rasterizer (Proof of Concept).
+//!
+//! Standalone `MPL-2.0` companion library for the Flux Browser Proof of Concept ecosystem.
 
 use std::collections::HashMap;
 use std::fmt;
