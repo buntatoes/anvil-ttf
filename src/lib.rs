@@ -1105,7 +1105,7 @@ mod tests {
         assert_eq!(font.glyph_id('i'), 2);
         assert!((font.glyph_advance_px('A', 20.0) - 14.0).abs() < 0.001);
         assert!((font.glyph_advance_px('i', 20.0) - 6.0).abs() < 0.001);
-        assert!((font.measure_text("Ai", 20.0) - 20.0).abs() < 0.001);
+        assert!((font.measure_text("AAi", 20.0) - 34.0).abs() < 0.001);
 
         let mut bad_header = vec![0u8; 16];
         bad_header[0..4].copy_from_slice(&0x0001_0000u32.to_be_bytes());
