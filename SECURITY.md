@@ -2,7 +2,7 @@
 
 ## Proof of Concept (PoC) Notice
 
-`flux-ttf` is a standalone, zero-dependency **Proof of Concept (PoC)** TrueType and OpenType (`.ttf` / `.otf`) SFNT font table parser, glyph outline decoder, and anti-aliased scanline rasterizer authored from scratch by **Buntos** as part of the [**Flux Browser**](https://github.com/buntatoes/flux-browser) engine ecosystem.
+`flux-ttf` is a standalone, zero-dependency **Proof of Concept (PoC)** TrueType and OpenType (`.ttf` / `.otf`) SFNT font table parser, glyph outline decoder, and anti-aliased scanline rasterizer built from scratch as part of the [**Flux Browser**](https://github.com/buntatoes/flux-browser) engine ecosystem.
 
 ---
 

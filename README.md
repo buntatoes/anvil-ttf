@@ -10,8 +10,7 @@
   </p>
 </div>
 
-> [!NOTE]
-> **Proof of Concept (PoC) Notice**: `flux-ttf` is a standalone, zero-dependency **Proof of Concept** TrueType and OpenType (`.ttf` / `.otf`) SFNT font parser, vector glyph outline decoder, and anti-aliased scanline rasterizer authored from scratch by **Buntos** as part of the [**Flux Browser**](https://github.com/buntatoes/flux-browser) engine ecosystem.
+`flux-ttf` is a standalone, zero-dependency Rust library that parses **TrueType** and **OpenType** (`.ttf` / `.otf`) SFNT font binaries, decodes `loca`/`glyf` vector contours, and rasterizes anti-aliased scanline glyph coverage bitmaps, built from scratch as part of the [**Flux Browser**](https://github.com/buntatoes/flux-browser) Proof of Concept engine ecosystem.
 
 ---
 
