@@ -3,9 +3,26 @@
 use std::collections::HashMap;
 use std::fmt;
 
+/// Maximum font binary size accepted (`32 MiB`).
+pub const MAX_FONT_BYTES: usize = 32 * 1024 * 1024;
+
+/// Maximum number of SFNT directory tables accepted (`128`).
+pub const MAX_SFNT_TABLES: usize = 128;
+
+/// Maximum contours per glyph outline (`256`).
+pub const MAX_GLYPH_CONTOURS: usize = 256;
+
+/// Maximum control points per glyph outline (`4,096`).
+pub const MAX_CONTOUR_POINTS: usize = 4096;
+
+/// Maximum compound glyph recursion depth (`16`).
+pub const MAX_COMPOSITE_GLYPH_DEPTH: u8 = 16;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TtfError {
     UnexpectedEof,
+    FontTooLarge { size: usize },
+    TooManyTables { count: usize },
     InvalidSfntSignature,
     MissingTable(&'static str),
     InvalidTable(&'static str),
@@ -15,6 +32,18 @@ impl fmt::Display for TtfError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::UnexpectedEof => write!(f, "unexpected end of font file"),
+            Self::FontTooLarge { size } => {
+                write!(
+                    f,
+                    "font size {size} exceeds security limit ({MAX_FONT_BYTES})"
+                )
+            }
+            Self::TooManyTables { count } => {
+                write!(
+                    f,
+                    "SFNT table count {count} exceeds security limit ({MAX_SFNT_TABLES})"
+                )
+            }
             Self::InvalidSfntSignature => write!(f, "unrecognized SFNT font signature"),
             Self::MissingTable(tag) => write!(f, "missing required SFNT table '{tag}'"),
             Self::InvalidTable(tag) => write!(f, "invalid SFNT table '{tag}'"),
@@ -62,6 +91,7 @@ pub struct TtfFont {
     pub ascender: i16,
     pub descender: i16,
     pub line_gap: i16,
+    family_name: String,
     cmap: HashMap<u32, u16>,
     metrics: Vec<HMetric>,
     kern_pairs: HashMap<(u16, u16), i16>,
@@ -71,6 +101,9 @@ pub struct TtfFont {
 impl TtfFont {
     /// Parse a TrueType or OpenType font binary into a [`TtfFont`].
     pub fn parse(bytes: &[u8]) -> Result<Self, TtfError> {
+        if bytes.len() > MAX_FONT_BYTES {
+            return Err(TtfError::FontTooLarge { size: bytes.len() });
+        }
         if bytes.len() < 12 {
             return Err(TtfError::UnexpectedEof);
         }
@@ -84,6 +117,9 @@ impl TtfFont {
         }
 
         let num_tables = read_u16_be(bytes, 4)? as usize;
+        if num_tables > MAX_SFNT_TABLES {
+            return Err(TtfError::TooManyTables { count: num_tables });
+        }
         if 12 + num_tables * 16 > bytes.len() {
             return Err(TtfError::UnexpectedEof);
         }
@@ -137,6 +173,12 @@ impl TtfFont {
             HashMap::new()
         };
 
+        let family_name = if let Some(&(off, len)) = tables.get(b"name") {
+            parse_name_table(&bytes[off..off + len]).unwrap_or_default()
+        } else {
+            String::new()
+        };
+
         let outlines = if let (Some(&(loca_off, loca_len)), Some(&(glyf_off, glyf_len))) =
             (tables.get(b"loca"), tables.get(b"glyf"))
         {
@@ -153,11 +195,17 @@ impl TtfFont {
             ascender,
             descender,
             line_gap,
+            family_name,
             cmap,
             metrics,
             kern_pairs,
             outlines,
         })
+    }
+
+    /// Return the font family name extracted from the SFNT `name` table, if present.
+    pub fn family_name(&self) -> &str {
+        &self.family_name
     }
 
     /// Attempt to load a system TrueType font (`Segoe UI` or `Consolas` on Windows).
@@ -519,13 +567,61 @@ fn parse_glyf_table(
     Ok(outlines)
 }
 
+fn parse_name_table(name_tbl: &[u8]) -> Option<String> {
+    if name_tbl.len() < 6 {
+        return None;
+    }
+    let count = read_u16_be(name_tbl, 2).ok()? as usize;
+    let string_offset = read_u16_be(name_tbl, 4).ok()? as usize;
+    if count > 512 || 6 + count * 12 > name_tbl.len() || string_offset > name_tbl.len() {
+        return None;
+    }
+    let mut fallback: Option<String> = None;
+    for i in 0..count {
+        let rec = 6 + i * 12;
+        let platform_id = read_u16_be(name_tbl, rec).ok()?;
+        let name_id = read_u16_be(name_tbl, rec + 6).ok()?;
+        let length = read_u16_be(name_tbl, rec + 8).ok()? as usize;
+        let offset = read_u16_be(name_tbl, rec + 10).ok()? as usize;
+        if name_id != 1 && name_id != 4 {
+            continue;
+        }
+        let start = string_offset.saturating_add(offset);
+        let end = start.saturating_add(length);
+        if end > name_tbl.len() || length == 0 || length > 256 {
+            continue;
+        }
+        let raw = &name_tbl[start..end];
+        let decoded = if platform_id == 0 || platform_id == 3 {
+            let mut u16s = Vec::with_capacity(raw.len() / 2);
+            for chunk in raw.chunks_exact(2) {
+                u16s.push(u16::from_be_bytes([chunk[0], chunk[1]]));
+            }
+            String::from_utf16_lossy(&u16s)
+        } else {
+            raw.iter()
+                .filter(|&&b| (32..=126).contains(&b))
+                .map(|&b| b as char)
+                .collect()
+        };
+        let trimmed = decoded.trim().to_string();
+        if !trimmed.is_empty() {
+            if name_id == 1 {
+                return Some(trimmed);
+            }
+            fallback = Some(trimmed);
+        }
+    }
+    fallback
+}
+
 fn parse_single_glyph(
     slice: &[u8],
     glyf: &[u8],
     offsets: &[usize],
     depth: u8,
 ) -> Result<Option<GlyphOutline>, TtfError> {
-    if depth > 8 || slice.len() < 10 {
+    if depth > MAX_COMPOSITE_GLYPH_DEPTH || slice.len() < 10 {
         return Ok(None);
     }
     let num_contours = read_i16_be(slice, 0)?;
@@ -538,6 +634,9 @@ fn parse_single_glyph(
         return Ok(None);
     }
     if num_contours > 0 {
+        if (num_contours as usize) > MAX_GLYPH_CONTOURS {
+            return Err(TtfError::InvalidTable("glyf"));
+        }
         let contours = parse_simple_contours(&slice[10..], num_contours as usize)?;
         Ok(Some(GlyphOutline {
             x_min,
@@ -562,7 +661,7 @@ fn parse_simple_contours(
     data: &[u8],
     num_contours: usize,
 ) -> Result<Vec<Vec<OutlinePoint>>, TtfError> {
-    if data.len() < num_contours * 2 + 2 {
+    if num_contours > MAX_GLYPH_CONTOURS || data.len() < num_contours * 2 + 2 {
         return Err(TtfError::InvalidTable("glyf"));
     }
     let mut end_pts = Vec::with_capacity(num_contours);
@@ -572,6 +671,9 @@ fn parse_simple_contours(
     let total_pts = end_pts.last().copied().map(|p| p + 1).unwrap_or(0);
     if total_pts == 0 {
         return Ok(Vec::new());
+    }
+    if total_pts > MAX_CONTOUR_POINTS {
+        return Err(TtfError::InvalidTable("glyf"));
     }
 
     let insn_len = read_u16_be(data, num_contours * 2)? as usize;
@@ -947,7 +1049,7 @@ mod tests {
         cmap.extend_from_slice(&105u32.to_be_bytes());
         cmap.extend_from_slice(&2u32.to_be_bytes());
 
-        let tables: [(&[u8; 4], &[u8]); 7] = [
+        let tables: [(&[u8; 4], &[u8]); 8] = [
             (b"cmap", &cmap),
             (b"glyf", &glyf),
             (b"head", &head),
@@ -955,6 +1057,19 @@ mod tests {
             (b"hmtx", &hmtx),
             (b"loca", &loca),
             (b"maxp", &maxp),
+            (
+                b"name",
+                &[
+                    0, 0, // format = 0
+                    0, 1, // count = 1
+                    0, 18, // stringOffset = 18
+                    0, 1, 0, 0, 0, 0, // platform 1 (Mac), encoding 0, language 0
+                    0, 1, // nameID = 1 (Font Family)
+                    0, 9, // length = 9
+                    0, 0, // offset = 0
+                    b'F', b'l', b'u', b'x', b' ', b'S', b'a', b'n', b's',
+                ],
+            ),
         ];
 
         let mut sfnt = Vec::new();
@@ -982,12 +1097,21 @@ mod tests {
     fn parses_sfnt_tables_and_computes_proportional_advances() {
         let bytes = build_minimal_synthetic_ttf();
         let font = TtfFont::parse(&bytes).unwrap();
+        assert_eq!(font.family_name(), "Flux Sans");
         assert_eq!(font.units_per_em, 1000);
         assert_eq!(font.glyph_id('A'), 1);
         assert_eq!(font.glyph_id('i'), 2);
         assert!((font.glyph_advance_px('A', 20.0) - 14.0).abs() < 0.001);
         assert!((font.glyph_advance_px('i', 20.0) - 6.0).abs() < 0.001);
         assert!((font.measure_text("Ai", 20.0) - 20.0).abs() < 0.001);
+
+        let mut bad_header = vec![0u8; 16];
+        bad_header[0..4].copy_from_slice(&0x0001_0000u32.to_be_bytes());
+        bad_header[4..6].copy_from_slice(&500u16.to_be_bytes()); // exceeds MAX_SFNT_TABLES
+        assert_eq!(
+            TtfFont::parse(&bad_header).unwrap_err(),
+            TtfError::TooManyTables { count: 500 }
+        );
     }
 
     #[test]

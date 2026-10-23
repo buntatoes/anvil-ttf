@@ -1,20 +1,20 @@
 # flux-ttf
 
-[![Release](https://img.shields.io/badge/release-v.02-e8c37a)](https://github.com/buntatoes/flux-ttf/releases/tag/v.02)
+[![Release](https://img.shields.io/badge/release-v.03-e8c37a)](https://github.com/buntatoes/flux-ttf/releases/tag/v.03)
 [![License: MPL-2.0](https://img.shields.io/badge/license-MPL--2.0-blue.svg)](./LICENSE)
 [![Edition](https://img.shields.io/badge/rust-2024_edition-orange.svg)](https://github.com/buntatoes/flux-ttf)
 
-`flux-ttf` is a standalone, zero-dependency Rust library that parses **TrueType** and **OpenType** (`.ttf` / `.otf`) SFNT font binaries to compute exact proportional glyph advance widths, horizontal kerning pairs, vertical line metrics, TrueType `loca`/`glyf` vector contours, and anti-aliased scanline glyph coverage bitmaps.
+`flux-ttf` is a standalone, zero-dependency Rust library that parses **TrueType** and **OpenType** (`.ttf` / `.otf`) SFNT font binaries to compute exact proportional glyph advance widths, horizontal kerning pairs, vertical line metrics, font family metadata (`name`), TrueType `loca`/`glyf` vector contours, and anti-aliased scanline glyph coverage bitmaps.
 
 ---
 
-## Features
+## Features (`v.03`)
 
-- **SFNT Table Directory Parser (`TtfFont::parse`)**:
-  - Validates TrueType (`0x00010000`, `true`) and OpenType (`OTTO`) SFNT containers.
-  - Parses `head` (`unitsPerEm`, `indexToLocFormat`), `hhea` (`ascender`, `descender`, `lineGap`, `numberOfHMetrics`), `maxp` (`numGlyphs`), `cmap` (**Format 4** BMP segment mapping and **Format 12** full Unicode segmented coverage), `hmtx` (per-glyph advance widths and left side bearings), `kern` (**Format 0** horizontal kerning pairs), `loca` (short and long glyph location indices), and `glyf` (simple and compound glyph vector contours).
-- **TrueType Outline Decoder & Anti-Aliased Scanline Rasterizer (`TtfFont::glyph_outline` / `TtfFont::rasterize_glyph`)**:
-  - Decodes simple glyph contours (on-curve and off-curve quadratic Bézier control points, repeat flags, 1-byte and 2-byte delta coordinates) and compound glyph components.
+- **SFNT Table Directory & Metadata Parser (`TtfFont::parse` / `TtfFont::family_name`)**:
+  - Validates TrueType (`0x00010000`, `true`) and OpenType (`OTTO`) SFNT containers under strict resource limits (`MAX_FONT_BYTES = 32 MiB`, `MAX_SFNT_TABLES = 128`).
+  - Parses `name` (Font Family & Full Name), `head` (`unitsPerEm`, `indexToLocFormat`), `hhea` (`ascender`, `descender`, `lineGap`, `numberOfHMetrics`), `maxp` (`numGlyphs`), `cmap` (**Format 4** BMP segment mapping and **Format 12** full Unicode segmented coverage), `hmtx` (per-glyph advance widths and left side bearings), `kern` (**Format 0** horizontal kerning pairs), `loca` (short and long glyph location indices), and `glyf` (simple and compound glyph vector contours).
+- **Hardened TrueType Outline Decoder & Anti-Aliased Scanline Rasterizer (`TtfFont::glyph_outline` / `TtfFont::rasterize_glyph`)**:
+  - Decodes simple glyph contours (bounded by `MAX_GLYPH_CONTOURS = 256` and `MAX_CONTOUR_POINTS = 4096`) and compound glyph components (bounded by `MAX_COMPOSITE_GLYPH_DEPTH = 16`).
   - Flattens quadratic Bézier curves and rasterizes glyphs at arbitrary pixel sizes into 8-bit alpha coverage bitmaps (`GlyphBitmap`) using a 4×4 supersampled non-zero winding scanline rasterizer.
 - **Proportional Text Measurement (`TtfFont::measure_text`)**:
   - Computes exact pixel widths for arbitrary UTF-8 strings at any target pixel size, including inter-glyph kerning adjustments.
