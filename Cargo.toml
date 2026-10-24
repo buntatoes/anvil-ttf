@@ -1,3 +1,7 @@
+# SFNT parser, glyph outlines, and an 8-bit coverage rasterizer.
+# Callers: flux-layout (text measurement) and flux-raster (Linux glyphs when
+# a system .ttf is found). No hinting and no GPU atlas upload.
+
 [package]
 name = "flux-ttf"
 version = "0.3.0"
