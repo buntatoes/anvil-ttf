@@ -1,88 +1,45 @@
-<div align="center">
-  <h1>flux-ttf</h1>
-  <p><strong>TrueType &amp; OpenType SFNT Font Parser, Glyph Outline Decoder &amp; Scanline Rasterizer (Proof of Concept)</strong></p>
-  <p>
-    <a href="https://github.com/buntatoes/flux-ttf/releases/tag/v.03"><img src="https://img.shields.io/badge/release-v.03-e8c37a?style=flat-square" alt="Release v.03" /></a>
-    <img src="https://img.shields.io/badge/status-Proof_of_Concept_(PoC)-d4a359?style=flat-square" alt="Proof of Concept" />
-    <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MPL--2.0-blue?style=flat-square" alt="License MPL-2.0" /></a>
-    <a href="./SECURITY.md"><img src="https://img.shields.io/badge/security-policy-2ea44f?style=flat-square" alt="Security Policy" /></a>
-    <a href="https://github.com/buntatoes/flux-ttf"><img src="https://img.shields.io/badge/rust-2024_edition-orange?style=flat-square" alt="Rust 2024 Edition" /></a>
-  </p>
-</div>
+# flux-ttf
 
-`flux-ttf` is a standalone, zero-dependency Rust library that parses **TrueType** and **OpenType** (`.ttf` / `.otf`) SFNT font binaries, decodes `loca`/`glyf` vector contours, and rasterizes anti-aliased scanline glyph coverage bitmaps, built from scratch as part of the [**Flux Browser**](https://github.com/buntatoes/flux-browser) Proof of Concept engine ecosystem.
+Reads TrueType and OpenType fonts and draws glyphs. Version 0.3.0.
 
----
+The browser uses `TtfFont::parse` on Linux when a system `.ttf` is installed. If parsing fails, text falls back to a built-in bitmap font in `flux-raster`.
 
-## Features (`v.03`)
+## What it does
 
-- **SFNT Table Directory & Metadata Parser (`TtfFont::parse` / `TtfFont::family_name`)**:
-  - Validates TrueType (`0x00010000`, `true`) and OpenType (`OTTO`) SFNT containers under strict resource limits (`MAX_FONT_BYTES = 32 MiB`, `MAX_SFNT_TABLES = 128`).
-  - Parses `name` (Font Family & Full Name), `head` (`unitsPerEm`, `indexToLocFormat`), `hhea` (`ascender`, `descender`, `lineGap`, `numberOfHMetrics`), `maxp` (`numGlyphs`), `cmap` (**Format 4** BMP segment mapping and **Format 12** full Unicode segmented coverage), `hmtx` (per-glyph advance widths and left side bearings), `kern` (**Format 0** horizontal kerning pairs), `loca` (short and long glyph location indices), and `glyf` (simple and compound glyph vector contours).
-- **Hardened TrueType Outline Decoder & Anti-Aliased Scanline Rasterizer (`TtfFont::glyph_outline` / `TtfFont::rasterize_glyph`)**:
-  - Decodes simple glyph contours (bounded by `MAX_GLYPH_CONTOURS = 256` and `MAX_CONTOUR_POINTS = 4096`) and compound glyph components (bounded by `MAX_COMPOSITE_GLYPH_DEPTH = 16`).
-  - Flattens quadratic Bezier curves and rasterizes glyphs at arbitrary pixel sizes into 8-bit alpha coverage bitmaps (`GlyphBitmap`) using a 4x4 supersampled non-zero winding scanline rasterizer.
-- **Proportional Text Measurement (`TtfFont::measure_text`)**:
-  - Computes exact pixel widths for arbitrary UTF-8 strings at any target pixel size, including inter-glyph kerning adjustments.
-- **Calibrated Proportional Fallback (`measure_proportional_fallback`)**:
-  - Provides proportional character advance ratios when measuring text without an external font binary.
+- `TtfFont::parse` reads an SFNT file: `name`, `head`, `hhea`, `maxp`, `cmap` (formats 4 and 12), `hmtx`, `kern` format 0, `loca`, and `glyf`.
+- Simple and compound glyph outlines are decoded. Compound glyphs stop at depth 16.
+- `rasterize_glyph` returns an 8-bit coverage bitmap.
+- `measure_text` and `glyph_advance_px` return widths, including kerning when the font has it.
+- `load_system_font` looks for a font file on the machine.
+- `measure_proportional_fallback` estimates width when no font file is available.
 
----
+## Limits
 
-## Quick Start
+- Font file size is capped at 32 MiB.
+- At most 128 SFNT tables, 256 contours per glyph, and 4096 points per glyph.
 
-```rust
-use flux_ttf::{TtfFont, measure_proportional_fallback};
+## Build
 
-// Measure proportional text using calibrated fallback ratios
-let narrow = measure_proportional_fallback("iiii", 16.0);
-let wide = measure_proportional_fallback("MMMM", 16.0);
-assert!(wide > narrow * 2.0);
-
-// Or load a system TrueType font and rasterize an anti-aliased glyph
-if let Some(font) = TtfFont::load_system_font(false, false) {
-    let width_px = font.measure_text("Hello, Flux!", 18.0);
-    assert!(width_px > 0.0);
-    if let Some(bitmap) = font.rasterize_glyph('A', 24.0) {
-        assert!(bitmap.width > 0 && bitmap.height > 0);
-    }
-}
 ```
-
----
-
-## API Overview
-
-| Function / Method | Description |
-| :--- | :--- |
-| `TtfFont::parse(&[u8]) -> Result<TtfFont, TtfError>` | Parses a `.ttf` or `.otf` binary buffer into a `TtfFont`. |
-| `TtfFont::load_system_font(bold, monospace) -> Option<TtfFont>` | Loads a standard system TrueType font if available. |
-| `TtfFont::glyph_id(char) -> u16` | Maps a Unicode scalar to its glyph index via `cmap`. |
-| `TtfFont::glyph_outline(u16) -> Option<&GlyphOutline>` | Returns the decoded `loca`/`glyf` vector contours for a glyph index. |
-| `TtfFont::rasterize_glyph(char, f32) -> Option<GlyphBitmap>` | Rasterizes a glyph outline into an 8-bit anti-aliased alpha coverage bitmap. |
-| `TtfFont::glyph_advance_px(char, f32) -> f32` | Returns the scaled horizontal advance width in pixels for a character. |
-| `TtfFont::measure_text(&str, f32) -> f32` | Measures the total pixel advance width of a string (including kerning). |
-| `TtfFont::line_height_px(f32) -> f32` | Computes recommended line height (`ascender - descender + lineGap`) in pixels. |
-| `measure_proportional_fallback(&str, f32) -> f32` | Measures text width using calibrated proportional character ratios. |
-
----
-
-## Building and Testing
-
-```powershell
 cargo test
 ```
 
----
+Rust 2024. No crates.io dependencies.
 
-## Security Policy
+## The other repositories
 
-See [`SECURITY.md`](./SECURITY.md) for supported versions, SFNT/contour parser bounds, and vulnerability reporting instructions.
+The browser is [flux-browser](https://github.com/buntatoes/flux-browser). These libraries sit next to it. None of them come from crates.io.
+
+| Repository | What it is |
+| --- | --- |
+| [flux-cipher](https://github.com/buntatoes/flux-cipher) | AES-128, AES-256, CTR, AES-256-GCM |
+| [flux-compress](https://github.com/buntatoes/flux-compress) | DEFLATE, zlib, gzip |
+| [flux-image](https://github.com/buntatoes/flux-image) | PNG, JPEG, GIF, WebP, ICO, BMP, PPM |
+| [flux-json](https://github.com/buntatoes/flux-json) | JSON |
+| [flux-ttf](https://github.com/buntatoes/flux-ttf) | TrueType and OpenType |
+| [flux-gpu](https://github.com/buntatoes/flux-gpu) | CPU drawing of boxes, shadows, and NV12 |
+| [flux-video](https://github.com/buntatoes/flux-video) | CPU frames in a small MP4 container |
 
 ## License
 
-Licensed under the Mozilla Public License Version 2.0 ([`MPL-2.0`](./LICENSE)).
-
-## Author
-
-**Buntos** ([@buntatoes](https://github.com/buntatoes))
+MPL-2.0. Copyright (c) 2026 Buntos.
