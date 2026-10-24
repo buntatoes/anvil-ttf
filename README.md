@@ -1,5 +1,5 @@
 <div align="center">
-  <h1>root-ttf</h1>
+  <h1>anvil-ttf</h1>
   <p>TrueType and OpenType, drawn to coverage bitmaps.</p>
   <p>
     <img src="https://img.shields.io/badge/release-v.04-e8c37a?style=flat-square" alt="v.04" />
@@ -12,7 +12,7 @@
 
 Version 0.4.0.
 
-The browser uses `TtfFont::parse` on Linux when a system `.ttf` is installed. If parsing fails, text falls back to a built-in bitmap font in `root-raster`.
+The browser uses `TtfFont::parse` on Linux when a system `.ttf` is installed. If parsing fails, text falls back to a built-in bitmap font in `anvil-raster`.
 
 ## What it does
 
@@ -38,17 +38,17 @@ Rust 2024. No crates.io dependencies.
 
 ## The other repositories
 
-The browser is [root-browser](https://github.com/buntatoes/root-browser). These libraries sit next to it. None of them come from crates.io.
+The browser is [anvil-browser](https://github.com/buntatoes/anvil-browser). These libraries sit next to it. None of them come from crates.io.
 
 | Repository | What it is |
 | --- | --- |
-| [root-cipher](https://github.com/buntatoes/root-cipher) | AES-128, AES-256, CTR, AES-256-GCM |
-| [root-compress](https://github.com/buntatoes/root-compress) | DEFLATE, zlib, gzip |
-| [root-image](https://github.com/buntatoes/root-image) | PNG, JPEG, GIF, WebP, ICO, BMP, PPM |
-| [root-json](https://github.com/buntatoes/root-json) | JSON |
-| [root-ttf](https://github.com/buntatoes/root-ttf) | TrueType and OpenType |
-| [root-gpu](https://github.com/buntatoes/root-gpu) | CPU drawing of boxes, shadows, and NV12 |
-| [root-video](https://github.com/buntatoes/root-video) | CPU frames in a small MP4 container |
+| [anvil-cipher](https://github.com/buntatoes/anvil-cipher) | AES-128, AES-256, CTR, AES-256-GCM |
+| [anvil-compress](https://github.com/buntatoes/anvil-compress) | DEFLATE, zlib, gzip |
+| [anvil-image](https://github.com/buntatoes/anvil-image) | PNG, JPEG, GIF, WebP, ICO, BMP, PPM |
+| [anvil-json](https://github.com/buntatoes/anvil-json) | JSON |
+| [anvil-ttf](https://github.com/buntatoes/anvil-ttf) | TrueType and OpenType |
+| [anvil-gpu](https://github.com/buntatoes/anvil-gpu) | CPU drawing of boxes, shadows, and NV12 |
+| [anvil-video](https://github.com/buntatoes/anvil-video) | CPU frames in a small MP4 container |
 
 ## License
 
