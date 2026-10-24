@@ -16,7 +16,7 @@
 //! coverage from 0 (empty) to 255 (solid), row 0 at the top. Font y grows up
 //! and is negated before the scan, so increasing the row index moves down.
 //!
-//! flux-layout uses the metric helpers to measure text. flux-raster on Linux
+//! root-layout uses the metric helpers to measure text. root-raster on Linux
 //! calls [`TtfFont::parse`] when a system `.ttf` is found, then
 //! [`TtfFont::rasterize_glyph`]. If that fails, the browser draws a built-in
 //! bitmap font instead. This crate does not shape complex scripts, hint
@@ -331,7 +331,7 @@ impl TtfFont {
     /// `bold`). Otherwise the file is Segoe UI (`segoeui.ttf`, or `segoeuib.ttf`
     /// when `bold`). The directory is `Fonts` under the `WINDIR` environment
     /// variable. Returns [`None`] when that variable is unset, the file cannot
-    /// be read, or [`TtfFont::parse`] fails. flux-layout calls this for
+    /// be read, or [`TtfFont::parse`] fails. root-layout calls this for
     /// proportional measurement. Linux glyph drawing does not; it reads a
     /// `.ttf` itself and calls [`TtfFont::parse`].
     pub fn load_system_font(bold: bool, monospace: bool) -> Option<Self> {
@@ -399,7 +399,7 @@ impl TtfFont {
     ///
     /// Each character adds its `hmtx` advance. Between two glyphs the `kern`
     /// value is added first. The design-unit sum is clamped at zero, then
-    /// multiplied by `font_size_px / units_per_em`. flux-layout uses this when
+    /// multiplied by `font_size_px / units_per_em`. root-layout uses this when
     /// [`TtfFont::load_system_font`] succeeds.
     pub fn measure_text(&self, text: &str, font_size_px: f32) -> f32 {
         let scale = font_size_px / (self.units_per_em as f32);
@@ -443,7 +443,7 @@ impl TtfFont {
     /// would be empty or larger than 512 pixels on a side. The outline is scaled
     /// by `max(font_size_px, 1) / max(units_per_em, 1)` and filled with nonzero
     /// winding at 4 by 4 samples per pixel. See [`GlyphBitmap`] for coverage
-    /// and y direction. flux-raster uses this for Linux glyphs.
+    /// and y direction. root-raster uses this for Linux glyphs.
     pub fn rasterize_glyph(&self, ch: char, font_size_px: f32) -> Option<GlyphBitmap> {
         let gid = self.glyph_id(ch);
         let outline = self.glyph_outline(gid)?;
@@ -461,7 +461,7 @@ impl TtfFont {
 /// Each character adds `font_size_px` times a ratio: space is 0.30, narrow marks
 /// and `i` / `l` are 0.28, `I` / `j` / `f` / `t` / `r` and brackets are 0.36,
 /// `m` / `w` / `M` / `W` / `@` / `%` are 0.82, other capitals are 0.66, digits
-/// are 0.56, and every other scalar is 0.54. There is no kerning. flux-layout
+/// are 0.56, and every other scalar is 0.54. There is no kerning. root-layout
 /// uses this when [`TtfFont::load_system_font`] returns [`None`].
 pub fn measure_proportional_fallback(text: &str, font_size_px: f32) -> f32 {
     let mut width = 0.0f32;
@@ -1408,7 +1408,7 @@ mod tests {
     fn parses_sfnt_tables_and_computes_proportional_advances() {
         let bytes = build_minimal_synthetic_ttf();
         let font = TtfFont::parse(&bytes).unwrap();
-        assert_eq!(font.family_name(), "Flux Sans");
+        assert_eq!(font.family_name(), "Root Sans");
         assert_eq!(font.units_per_em, 1000);
         assert_eq!(font.glyph_id('A'), 1);
         assert_eq!(font.glyph_id('i'), 2);
