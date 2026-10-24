@@ -15,4 +15,4 @@ Do not put the details in a public issue.
 - Files larger than 32 MiB are rejected.
 - Table count, contour count, point count, and compound-glyph depth are capped (128 tables, 256 contours, 4096 points, depth 16).
 
-Version 0.3.0 is current.
+Version 0.4.0 is current.
