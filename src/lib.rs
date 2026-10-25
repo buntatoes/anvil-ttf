@@ -361,6 +361,9 @@ impl TtfFont {
             let glyf_slice = &bytes[glyf_off..glyf_off + glyf_len];
             parse_glyf_table(loca_slice, glyf_slice, num_glyphs, index_to_loc_format)
                 .unwrap_or_else(|_| vec![None; num_glyphs])
+        } else if let Some(&(cff_off, cff_len)) = tables.get(b"CFF ") {
+            parse_cff_table(&bytes[cff_off..cff_off + cff_len], num_glyphs)
+                .unwrap_or_else(|_| vec![None; num_glyphs])
         } else {
             vec![None; num_glyphs]
         };
@@ -1188,6 +1191,493 @@ fn parse_glyf_table(
         }
         let slice = &glyf[start..end];
         outlines.push(parse_single_glyph(slice, glyf, &offsets, 0).ok().flatten());
+    }
+    Ok(outlines)
+}
+
+fn flush_cff_contour(
+    current: &mut Vec<(f32, f32, CurveOrder)>,
+    contours: &mut Vec<Vec<OutlinePoint>>,
+) {
+    if current.len() >= 2 && contours.len() < MAX_GLYPH_CONTOURS {
+        let poly = flatten_cubic_contour(current);
+        if poly.len() >= 3 {
+            let mut pts = Vec::with_capacity(poly.len().min(MAX_CONTOUR_POINTS));
+            for &(x, y) in poly.iter().take(MAX_CONTOUR_POINTS) {
+                pts.push(OutlinePoint::on_curve(
+                    x.round().clamp(-32768.0, 32767.0) as i16,
+                    y.round().clamp(-32768.0, 32767.0) as i16,
+                ));
+            }
+            contours.push(pts);
+        }
+    }
+    current.clear();
+}
+
+/// Interpret a Compact Font Format (`CFF ` / `CFF2`) Type 2 CharString bytecode program into a [`GlyphOutline`].
+///
+/// Supports Type 2 path operators (`rmoveto`, `hmoveto`, `vmoveto`, `rlineto`, `hlineto`, `vlineto`,
+/// `rrcurveto`, `hhcurveto`, `vvcurveto`, `hvcurveto`, `vhcurveto`, `rcurveline`, `rlinecurve`, `endchar`)
+/// and stem/hintmask operators (`hstem`, `vstem`, `hstemhm`, `vstemhm`, `hintmask`, `cntrmask`).
+pub fn interpret_type2_charstring(program: &[u8]) -> Option<GlyphOutline> {
+    let mut stack: Vec<f32> = Vec::with_capacity(48);
+    let mut contours: Vec<Vec<OutlinePoint>> = Vec::new();
+    let mut current: Vec<(f32, f32, CurveOrder)> = Vec::new();
+    let mut cx = 0.0f32;
+    let mut cy = 0.0f32;
+    let mut stem_hints = 0usize;
+    let mut i = 0usize;
+
+    while i < program.len() {
+        let b0 = program[i];
+        i += 1;
+        match b0 {
+            28 => {
+                if i + 2 > program.len() {
+                    break;
+                }
+                let val = i16::from_be_bytes([program[i], program[i + 1]]) as f32;
+                i += 2;
+                if stack.len() < 48 {
+                    stack.push(val);
+                }
+            }
+            32..=246 => {
+                if stack.len() < 48 {
+                    stack.push((i32::from(b0) - 139) as f32);
+                }
+            }
+            247..=250 => {
+                if i >= program.len() {
+                    break;
+                }
+                let b1 = program[i];
+                i += 1;
+                let val = ((i32::from(b0) - 247) * 256 + i32::from(b1) + 108) as f32;
+                if stack.len() < 48 {
+                    stack.push(val);
+                }
+            }
+            251..=254 => {
+                if i >= program.len() {
+                    break;
+                }
+                let b1 = program[i];
+                i += 1;
+                let val = -((i32::from(b0) - 251) * 256 + i32::from(b1) + 108) as f32;
+                if stack.len() < 48 {
+                    stack.push(val);
+                }
+            }
+            255 => {
+                if i + 4 > program.len() {
+                    break;
+                }
+                let raw = i32::from_be_bytes([
+                    program[i],
+                    program[i + 1],
+                    program[i + 2],
+                    program[i + 3],
+                ]);
+                i += 4;
+                if stack.len() < 48 {
+                    stack.push((raw as f32) / 65536.0);
+                }
+            }
+            1 | 3 | 18 | 23 => {
+                stem_hints += stack.len() / 2;
+                stack.clear();
+            }
+            19 | 20 => {
+                stem_hints += stack.len() / 2;
+                stack.clear();
+                let mask_bytes = (stem_hints + 7) / 8;
+                i = i.saturating_add(mask_bytes).min(program.len());
+            }
+            21 => {
+                // rmoveto
+                flush_cff_contour(&mut current, &mut contours);
+                if stack.len() >= 2 {
+                    let dy = stack[stack.len() - 1];
+                    let dx = stack[stack.len() - 2];
+                    cx += dx;
+                    cy += dy;
+                    current.push((cx, cy, CurveOrder::OnCurve));
+                }
+                stack.clear();
+            }
+            22 => {
+                // hmoveto
+                flush_cff_contour(&mut current, &mut contours);
+                if let Some(&dx) = stack.last() {
+                    cx += dx;
+                    current.push((cx, cy, CurveOrder::OnCurve));
+                }
+                stack.clear();
+            }
+            4 => {
+                // vmoveto
+                flush_cff_contour(&mut current, &mut contours);
+                if let Some(&dy) = stack.last() {
+                    cy += dy;
+                    current.push((cx, cy, CurveOrder::OnCurve));
+                }
+                stack.clear();
+            }
+            5 => {
+                // rlineto
+                for pair in stack.chunks_exact(2) {
+                    cx += pair[0];
+                    cy += pair[1];
+                    current.push((cx, cy, CurveOrder::OnCurve));
+                }
+                stack.clear();
+            }
+            6 | 7 => {
+                // hlineto (6) or vlineto (7)
+                let mut horiz = b0 == 6;
+                for &delta in &stack {
+                    if horiz {
+                        cx += delta;
+                    } else {
+                        cy += delta;
+                    }
+                    current.push((cx, cy, CurveOrder::OnCurve));
+                    horiz = !horiz;
+                }
+                stack.clear();
+            }
+            8 => {
+                // rrcurveto
+                for seg in stack.chunks_exact(6) {
+                    let x1 = cx + seg[0];
+                    let y1 = cy + seg[1];
+                    let x2 = x1 + seg[2];
+                    let y2 = y1 + seg[3];
+                    cx = x2 + seg[4];
+                    cy = y2 + seg[5];
+                    current.push((x1, y1, CurveOrder::CubicOffCurve));
+                    current.push((x2, y2, CurveOrder::CubicOffCurve));
+                    current.push((cx, cy, CurveOrder::OnCurve));
+                }
+                stack.clear();
+            }
+            24 => {
+                // rcurveline
+                if stack.len() >= 8 {
+                    let curve_end = stack.len() - 2;
+                    for seg in stack[..curve_end].chunks_exact(6) {
+                        let x1 = cx + seg[0];
+                        let y1 = cy + seg[1];
+                        let x2 = x1 + seg[2];
+                        let y2 = y1 + seg[3];
+                        cx = x2 + seg[4];
+                        cy = y2 + seg[5];
+                        current.push((x1, y1, CurveOrder::CubicOffCurve));
+                        current.push((x2, y2, CurveOrder::CubicOffCurve));
+                        current.push((cx, cy, CurveOrder::OnCurve));
+                    }
+                    cx += stack[curve_end];
+                    cy += stack[curve_end + 1];
+                    current.push((cx, cy, CurveOrder::OnCurve));
+                }
+                stack.clear();
+            }
+            25 => {
+                // rlinecurve
+                if stack.len() >= 8 {
+                    let line_end = stack.len() - 6;
+                    for pair in stack[..line_end].chunks_exact(2) {
+                        cx += pair[0];
+                        cy += pair[1];
+                        current.push((cx, cy, CurveOrder::OnCurve));
+                    }
+                    let seg = &stack[line_end..];
+                    let x1 = cx + seg[0];
+                    let y1 = cy + seg[1];
+                    let x2 = x1 + seg[2];
+                    let y2 = y1 + seg[3];
+                    cx = x2 + seg[4];
+                    cy = y2 + seg[5];
+                    current.push((x1, y1, CurveOrder::CubicOffCurve));
+                    current.push((x2, y2, CurveOrder::CubicOffCurve));
+                    current.push((cx, cy, CurveOrder::OnCurve));
+                }
+                stack.clear();
+            }
+            26 => {
+                // vvcurveto
+                let mut idx = 0usize;
+                let mut dx1 = 0.0f32;
+                if stack.len() % 4 == 1 {
+                    dx1 = stack[0];
+                    idx = 1;
+                }
+                while idx + 4 <= stack.len() {
+                    let x1 = cx + dx1;
+                    let y1 = cy + stack[idx];
+                    let x2 = x1 + stack[idx + 1];
+                    let y2 = y1 + stack[idx + 2];
+                    cx = x2;
+                    cy = y2 + stack[idx + 3];
+                    current.push((x1, y1, CurveOrder::CubicOffCurve));
+                    current.push((x2, y2, CurveOrder::CubicOffCurve));
+                    current.push((cx, cy, CurveOrder::OnCurve));
+                    dx1 = 0.0;
+                    idx += 4;
+                }
+                stack.clear();
+            }
+            27 => {
+                // hhcurveto
+                let mut idx = 0usize;
+                let mut dy1 = 0.0f32;
+                if stack.len() % 4 == 1 {
+                    dy1 = stack[0];
+                    idx = 1;
+                }
+                while idx + 4 <= stack.len() {
+                    let x1 = cx + stack[idx];
+                    let y1 = cy + dy1;
+                    let x2 = x1 + stack[idx + 1];
+                    let y2 = y1 + stack[idx + 2];
+                    cx = x2 + stack[idx + 3];
+                    cy = y2;
+                    current.push((x1, y1, CurveOrder::CubicOffCurve));
+                    current.push((x2, y2, CurveOrder::CubicOffCurve));
+                    current.push((cx, cy, CurveOrder::OnCurve));
+                    dy1 = 0.0;
+                    idx += 4;
+                }
+                stack.clear();
+            }
+            30 | 31 => {
+                // vhcurveto (30) or hvcurveto (31)
+                let mut vertical_first = b0 == 30;
+                let mut idx = 0usize;
+                while idx + 4 <= stack.len() {
+                    let trailing = if idx + 5 == stack.len() {
+                        stack[idx + 4]
+                    } else {
+                        0.0
+                    };
+                    if vertical_first {
+                        let x1 = cx;
+                        let y1 = cy + stack[idx];
+                        let x2 = x1 + stack[idx + 1];
+                        let y2 = y1 + stack[idx + 2];
+                        cx = x2 + stack[idx + 3];
+                        cy = y2 + trailing;
+                        current.push((x1, y1, CurveOrder::CubicOffCurve));
+                        current.push((x2, y2, CurveOrder::CubicOffCurve));
+                        current.push((cx, cy, CurveOrder::OnCurve));
+                    } else {
+                        let x1 = cx + stack[idx];
+                        let y1 = cy;
+                        let x2 = x1 + stack[idx + 1];
+                        let y2 = y1 + stack[idx + 2];
+                        cx = x2 + trailing;
+                        cy = y2 + stack[idx + 3];
+                        current.push((x1, y1, CurveOrder::CubicOffCurve));
+                        current.push((x2, y2, CurveOrder::CubicOffCurve));
+                        current.push((cx, cy, CurveOrder::OnCurve));
+                    }
+                    vertical_first = !vertical_first;
+                    idx += if idx + 5 == stack.len() { 5 } else { 4 };
+                }
+                stack.clear();
+            }
+            12 => {
+                if i < program.len() {
+                    i += 1;
+                }
+                stack.clear();
+            }
+            14 => {
+                // endchar
+                flush_cff_contour(&mut current, &mut contours);
+                break;
+            }
+            _ => {
+                stack.clear();
+            }
+        }
+    }
+    flush_cff_contour(&mut current, &mut contours);
+    if contours.is_empty() {
+        return None;
+    }
+
+    let mut x_min = i16::MAX;
+    let mut y_min = i16::MAX;
+    let mut x_max = i16::MIN;
+    let mut y_max = i16::MIN;
+    for contour in &contours {
+        for pt in contour {
+            x_min = x_min.min(pt.x);
+            y_min = y_min.min(pt.y);
+            x_max = x_max.max(pt.x);
+            y_max = y_max.max(pt.y);
+        }
+    }
+    Some(GlyphOutline {
+        x_min,
+        y_min,
+        x_max,
+        y_max,
+        contours,
+    })
+}
+
+fn read_cff_offset(bytes: &[u8], pos: usize, off_size: usize) -> Option<usize> {
+    if off_size == 0 || off_size > 4 || pos + off_size > bytes.len() {
+        return None;
+    }
+    let mut v = 0usize;
+    for &b in &bytes[pos..pos + off_size] {
+        v = (v << 8) | usize::from(b);
+    }
+    Some(v)
+}
+
+/// Parse a CFF 1.0 `INDEX` structure starting at `start`, returning the item slices and the byte offset after the INDEX.
+fn parse_cff_index<'a>(cff: &'a [u8], start: usize) -> Option<(Vec<&'a [u8]>, usize)> {
+    if start + 2 > cff.len() {
+        return None;
+    }
+    let count = u16::from_be_bytes([cff[start], cff[start + 1]]) as usize;
+    if count == 0 {
+        return Some((Vec::new(), start + 2));
+    }
+    if start + 3 > cff.len() || count > 65535 {
+        return None;
+    }
+    let off_size = usize::from(cff[start + 2]);
+    let off_array_start = start + 3;
+    let off_array_len = (count + 1).checked_mul(off_size)?;
+    let data_base = off_array_start.checked_add(off_array_len)?.checked_sub(1)?;
+    if off_array_start + off_array_len > cff.len() {
+        return None;
+    }
+    let mut offsets = Vec::with_capacity(count + 1);
+    for idx in 0..=count {
+        let off = read_cff_offset(cff, off_array_start + idx * off_size, off_size)?;
+        if off == 0 {
+            return None;
+        }
+        offsets.push(off);
+    }
+    let end_pos = data_base.checked_add(*offsets.last()?)?;
+    if end_pos > cff.len() {
+        return None;
+    }
+    let mut items = Vec::with_capacity(count.min(8192));
+    for idx in 0..count.min(8192) {
+        let s = data_base.checked_add(offsets[idx])?;
+        let e = data_base.checked_add(offsets[idx + 1])?;
+        if s > e || e > cff.len() {
+            return None;
+        }
+        items.push(&cff[s..e]);
+    }
+    Some((items, end_pos))
+}
+
+/// Extract the `CharStrings` table offset (operator `17`) from a CFF Top DICT byte slice.
+fn parse_cff_top_dict_charstrings_offset(dict: &[u8]) -> Option<usize> {
+    let mut stack: Vec<i32> = Vec::with_capacity(16);
+    let mut i = 0usize;
+    while i < dict.len() {
+        let b0 = dict[i];
+        i += 1;
+        match b0 {
+            28 => {
+                if i + 2 > dict.len() {
+                    break;
+                }
+                let v = i16::from_be_bytes([dict[i], dict[i + 1]]) as i32;
+                i += 2;
+                stack.push(v);
+            }
+            29 => {
+                if i + 4 > dict.len() {
+                    break;
+                }
+                let v = i32::from_be_bytes([dict[i], dict[i + 1], dict[i + 2], dict[i + 3]]);
+                i += 4;
+                stack.push(v);
+            }
+            30 => {
+                while i < dict.len() {
+                    let nib_byte = dict[i];
+                    i += 1;
+                    if (nib_byte & 0xF0) == 0xF0 || (nib_byte & 0x0F) == 0x0F {
+                        break;
+                    }
+                }
+                stack.push(0);
+            }
+            32..=246 => stack.push(i32::from(b0) - 139),
+            247..=250 => {
+                if i >= dict.len() {
+                    break;
+                }
+                let b1 = dict[i];
+                i += 1;
+                stack.push((i32::from(b0) - 247) * 256 + i32::from(b1) + 108);
+            }
+            251..=254 => {
+                if i >= dict.len() {
+                    break;
+                }
+                let b1 = dict[i];
+                i += 1;
+                stack.push(-((i32::from(b0) - 251) * 256 + i32::from(b1) + 108));
+            }
+            12 => {
+                if i < dict.len() {
+                    i += 1;
+                }
+                stack.clear();
+            }
+            17 => {
+                let off = *stack.last()?;
+                return (off > 0).then_some(off as usize);
+            }
+            _ => {
+                stack.clear();
+            }
+        }
+    }
+    None
+}
+
+/// Parse an OpenType `CFF ` table and decode each glyph's Type 2 CharString into a [`GlyphOutline`].
+fn parse_cff_table(cff: &[u8], num_glyphs: usize) -> Result<Vec<Option<GlyphOutline>>, TtfError> {
+    if cff.len() < 4 || cff[0] != 1 {
+        return Err(TtfError::InvalidTable("CFF "));
+    }
+    let hdr_size = usize::from(cff[2]);
+    let (_, after_name_idx) =
+        parse_cff_index(cff, hdr_size).ok_or(TtfError::InvalidTable("CFF "))?;
+    let (top_dicts, _) =
+        parse_cff_index(cff, after_name_idx).ok_or(TtfError::InvalidTable("CFF "))?;
+    let top_dict = top_dicts
+        .first()
+        .copied()
+        .ok_or(TtfError::InvalidTable("CFF "))?;
+    let charstrings_off =
+        parse_cff_top_dict_charstrings_offset(top_dict).ok_or(TtfError::InvalidTable("CFF "))?;
+    let (charstrings, _) =
+        parse_cff_index(cff, charstrings_off).ok_or(TtfError::InvalidTable("CFF "))?;
+
+    let mut outlines = Vec::with_capacity(num_glyphs);
+    for gid in 0..num_glyphs {
+        let outline = charstrings
+            .get(gid)
+            .and_then(|prog| interpret_type2_charstring(prog));
+        outlines.push(outline);
     }
     Ok(outlines)
 }
@@ -2099,5 +2589,43 @@ mod tests {
             (lcd.width * lcd.height * 3) as usize
         );
         assert!(lcd.rgb_coverage.iter().any(|&v| v == 255));
+
+        // CFF Type 2 CharString interpreter & CFF 1.0 table parser:
+        // Encode numbers in Type 2 single-byte form (v + 139):
+        // rmoveto(50, 0), rrcurveto(0, 60, 40, 40, 60, 0), vlineto(-100), hlineto(-100), endchar
+        let prog = [
+            189u8, 139, 21, // 50, 0, rmoveto
+            139, 199, 179, 179, 199, 139, 8, // 0, 60, 40, 40, 60, 0, rrcurveto
+            39, 7, // -100, vlineto
+            39, 6,  // -100, hlineto
+            14, // endchar
+        ];
+        let cff_outline = interpret_type2_charstring(&prog).expect("CFF Type 2 outline");
+        assert_eq!(cff_outline.contours.len(), 1);
+        assert!(cff_outline.contours[0].len() >= 10);
+        assert_eq!(cff_outline.x_min, 50);
+        assert_eq!(cff_outline.x_max, 150);
+
+        // Build a synthetic CFF 1.0 table with Name INDEX, Top DICT INDEX (op 17 -> offset 17), and CharStrings INDEX
+        let mut cff = Vec::new();
+        cff.extend_from_slice(&[1, 0, 4, 1]); // CFF header (4 bytes)
+        cff.extend_from_slice(&0u16.to_be_bytes()); // Name INDEX (empty, 2 bytes -> offset 6)
+        // Top DICT INDEX at offset 6: count=1 (2B), offSize=1 (1B), offsets=[1, 3] (2B), data=[156 (17+139), 17 (op CharStrings)] (2B) -> ends at offset 13
+        cff.extend_from_slice(&1u16.to_be_bytes());
+        cff.push(1);
+        cff.extend_from_slice(&[1, 3]);
+        cff.extend_from_slice(&[13 + 139, 17]);
+        // CharStrings INDEX at offset 13: count=2 (.notdef + glyph 1)
+        cff.extend_from_slice(&2u16.to_be_bytes());
+        cff.push(1);
+        let notdef_prog = [14u8];
+        let g1_end = 1 + notdef_prog.len() + prog.len();
+        cff.extend_from_slice(&[1, (1 + notdef_prog.len()) as u8, g1_end as u8]);
+        cff.extend_from_slice(&notdef_prog);
+        cff.extend_from_slice(&prog);
+
+        let cff_outlines = parse_cff_table(&cff, 2).expect("parse CFF table");
+        assert!(cff_outlines[0].is_none());
+        assert!(cff_outlines[1].is_some());
     }
 }

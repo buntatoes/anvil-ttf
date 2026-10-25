@@ -2,7 +2,7 @@
   <h1>anvil-ttf</h1>
   <p>TrueType and OpenType, drawn to coverage bitmaps.</p>
   <p>
-    <img src="https://img.shields.io/badge/release-v.05-e8c37a?style=flat-square" alt="v.05" />
+    <img src="https://img.shields.io/badge/release-v.06-e8c37a?style=flat-square" alt="v.06" />
     <img src="https://img.shields.io/badge/status-Proof_of_Concept-d4a359?style=flat-square" alt="Proof of Concept" />
     <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MPL--2.0-blue?style=flat-square" alt="MPL-2.0" /></a>
     <a href="./SECURITY.md"><img src="https://img.shields.io/badge/security-policy-2ea44f?style=flat-square" alt="Security" /></a>
@@ -10,14 +10,14 @@
   </p>
 </div>
 
-Version 0.5.0.
+Version 0.6.0.
 
 The browser uses `TtfFont::parse` on Linux when a system `.ttf` is installed. If parsing fails, text falls back to a built-in bitmap font in `anvil-raster`.
 
 ## What it does
 
-- `TtfFont::parse` reads an SFNT file: `name`, `head`, `hhea`, `maxp`, `cmap` (formats 4 and 12), `hmtx`, `kern` format 0, OpenType `GPOS` Lookup Type 2 (`PairPosFormat1` and `PairPosFormat2`), `loca`, and `glyf`.
-- Simple and compound glyph outlines are decoded. Compound glyphs stop at depth 16.
+- `TtfFont::parse` reads an SFNT file: `name`, `head`, `hhea`, `maxp`, `cmap` (formats 4 and 12), `hmtx`, `kern` format 0, OpenType `GPOS` Lookup Type 2 (`PairPosFormat1` and `PairPosFormat2`), `loca` + `glyf`, and OpenType `CFF ` (Compact Font Format 1.0 INDEX, Top DICT, and Type 2 CharString interpreter).
+- Simple, compound, and `CFF ` Type 2 CharString (`rmoveto`, `hmoveto`, `vmoveto`, `rlineto`, `hlineto`, `vlineto`, `rrcurveto`, `hhcurveto`, `vvcurveto`, `hvcurveto`, `vhcurveto`, `rcurveline`, `rlinecurve`) glyph outlines are decoded. Compound glyphs stop at depth 16.
 - `rasterize_glyph` returns an 8-bit coverage bitmap, and `rasterize_glyph_subpixel_lcd` returns a 3x horizontal RGB subpixel coverage bitmap with a 3-tap FIR filter.
 - `measure_text` and `glyph_advance_px` return widths, including kerning when the font has it.
 - `load_system_font` looks for a font file on the machine.
