@@ -1,7 +1,8 @@
 //! TrueType and OpenType SFNT parser, glyph outlines, and an 8-bit coverage rasterizer.
 //!
 //! Tables read from the font are `name`, `head`, `hhea`, `maxp`, `cmap`, `hmtx`,
-//! optional `kern` format 0, and optional `loca` plus `glyf`. Multi-byte values
+//! optional `kern` format 0, optional OpenType `GPOS` Lookup Type 2 (`PairPosFormat1`
+//! and `PairPosFormat2`), and optional `loca` plus `glyf`. Multi-byte values
 //! and directory offsets are big-endian. Character codes become glyph indices
 //! through cmap format 4 (Unicode BMP segments) and format 12 (UCS-4 groups).
 //! Other cmap formats are ignored. `head.unitsPerEm` is the design-unit size of
@@ -101,6 +102,17 @@ pub struct HMetric {
     pub left_side_bearing: i16,
 }
 
+/// Curve order for an outline point when flattening quadratic or cubic Bezier contours.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CurveOrder {
+    /// On-curve vertex.
+    OnCurve,
+    /// Off-curve quadratic Bezier control point (`glyf`).
+    QuadraticOffCurve,
+    /// Off-curve cubic Bezier control point.
+    CubicOffCurve,
+}
+
 /// One point on a glyph contour, in font design units.
 ///
 /// `y` increases upward, which is the `glyf` convention. The rasterizer negates
@@ -161,6 +173,52 @@ pub struct GlyphBitmap {
     pub advance_px: f32,
     /// Row-major coverage, length `width * height`. 0 is empty, 255 is solid.
     pub coverage: Vec<u8>,
+}
+
+/// 3x horizontal RGB subpixel LCD coverage bitmap for one rasterized glyph.
+///
+/// [`rgb_coverage`](Self::rgb_coverage) is row-major and holds `width * height * 3`
+/// bytes (`R`, `G`, `B` coverage in `0..=255` for each pixel) after a 3-tap
+/// `[1, 2, 1] / 4` horizontal FIR filter to suppress color fringing.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SubpixelGlyphBitmap {
+    /// Bitmap width in whole pixels.
+    pub width: u32,
+    /// Bitmap height in pixels. Row 0 is the top.
+    pub height: u32,
+    /// Left edge relative to the glyph origin, in pixels. May be negative.
+    pub bearing_x: i32,
+    /// Distance from the baseline up to row 0, in pixels.
+    pub bearing_y: i32,
+    /// Horizontal pen advance at this pixel size. Kerning is not included.
+    pub advance_px: f32,
+    /// Row-major RGB subpixel coverage (`width * height * 3` bytes).
+    pub rgb_coverage: Vec<u8>,
+}
+
+impl OutlinePoint {
+    /// Create an on-curve contour vertex.
+    pub const fn on_curve(x: i16, y: i16) -> Self {
+        Self {
+            x,
+            y,
+            on_curve: true,
+        }
+    }
+
+    /// Create an off-curve quadratic control point.
+    pub const fn quadratic(x: i16, y: i16) -> Self {
+        Self {
+            x,
+            y,
+            on_curve: false,
+        }
+    }
+
+    /// Create a cubic control point tuple `(x, y, CurveOrder::CubicOffCurve)`.
+    pub const fn cubic(x: i16, y: i16) -> (i16, i16, CurveOrder) {
+        (x, y, CurveOrder::CubicOffCurve)
+    }
 }
 
 /// Parsed TrueType or OpenType font.
@@ -279,11 +337,14 @@ impl TtfFont {
         let cmap = parse_cmap(cmap_table)?;
 
         // Optional. A missing or unreadable kern table leaves every pair at 0.
-        let kern_pairs = if let Some(&(off, len)) = tables.get(b"kern") {
+        let mut kern_pairs = if let Some(&(off, len)) = tables.get(b"kern") {
             parse_kern(&bytes[off..off + len]).unwrap_or_default()
         } else {
             HashMap::new()
         };
+        if let Some(&(off, len)) = tables.get(b"GPOS") {
+            parse_gpos(&bytes[off..off + len], &mut kern_pairs);
+        }
 
         // Optional. Failure here is an empty family name, not a parse error.
         let family_name = if let Some(&(off, len)) = tables.get(b"name") {
@@ -453,6 +514,25 @@ impl TtfFont {
         let scale = font_size_px.max(1.0) / (self.units_per_em.max(1) as f32);
         let advance_px = (self.glyph_metric(gid).advance_width as f32) * scale;
         rasterize_outline(outline, scale, advance_px)
+    }
+
+    /// Rasterize `ch` at `font_size_px` into a 3x horizontal RGB subpixel LCD coverage bitmap.
+    ///
+    /// Samples 12 by 4 subpixels per pixel (4 by 4 for each R, G, and B subpixel column)
+    /// and applies a 3-tap `[1, 2, 1] / 4` horizontal FIR filter across subpixel columns.
+    pub fn rasterize_glyph_subpixel_lcd(
+        &self,
+        ch: char,
+        font_size_px: f32,
+    ) -> Option<SubpixelGlyphBitmap> {
+        let gid = self.glyph_id(ch);
+        let outline = self.glyph_outline(gid)?;
+        if outline.contours.is_empty() {
+            return None;
+        }
+        let scale = font_size_px.max(1.0) / (self.units_per_em.max(1) as f32);
+        let advance_px = (self.glyph_metric(gid).advance_width as f32) * scale;
+        rasterize_outline_subpixel_lcd(outline, scale, advance_px)
     }
 }
 
@@ -732,6 +812,312 @@ fn parse_kern(kern: &[u8]) -> Result<HashMap<(u16, u16), i16>, TtfError> {
         pos += sub_len;
     }
     Ok(pairs)
+}
+
+/// Byte size of an OpenType `ValueRecord` given its `ValueFormat` bitmask.
+fn value_record_byte_len(format: u16) -> usize {
+    (format.count_ones() as usize) * 2
+}
+
+/// Byte offset of `XAdvance` (`0x0004`) inside an OpenType `ValueRecord`.
+fn x_advance_offset_in_record(format: u16) -> Option<usize> {
+    if (format & 0x0004) == 0 {
+        return None;
+    }
+    let earlier_fields = (format & 0x0003).count_ones() as usize;
+    Some(earlier_fields * 2)
+}
+
+/// Parse an OpenType `Coverage` table (Format 1 glyph array or Format 2 range records)
+/// into `(coverage_index, glyph_id)` pairs.
+fn parse_gpos_coverage(cov: &[u8]) -> Vec<(usize, u16)> {
+    let mut out = Vec::new();
+    let Ok(format) = read_u16_be(cov, 0) else {
+        return out;
+    };
+    if format == 1 {
+        let Ok(count) = read_u16_be(cov, 2) else {
+            return out;
+        };
+        let n = (count as usize).min(4096);
+        if 4 + n * 2 > cov.len() {
+            return out;
+        }
+        for i in 0..n {
+            if let Ok(gid) = read_u16_be(cov, 4 + i * 2) {
+                out.push((i, gid));
+            }
+        }
+    } else if format == 2 {
+        let Ok(range_count) = read_u16_be(cov, 2) else {
+            return out;
+        };
+        let n = (range_count as usize).min(1024);
+        if 4 + n * 6 > cov.len() {
+            return out;
+        }
+        for i in 0..n {
+            let rec = 4 + i * 6;
+            let (Ok(start_gid), Ok(end_gid), Ok(start_cov)) = (
+                read_u16_be(cov, rec),
+                read_u16_be(cov, rec + 2),
+                read_u16_be(cov, rec + 4),
+            ) else {
+                break;
+            };
+            if end_gid < start_gid || (end_gid - start_gid) > 2048 {
+                continue;
+            }
+            for gid in start_gid..=end_gid {
+                let cov_idx = (start_cov as usize) + usize::from(gid - start_gid);
+                out.push((cov_idx, gid));
+            }
+        }
+    }
+    out
+}
+
+/// Parse an OpenType `ClassDef` table (Format 1 array or Format 2 range records)
+/// into `(glyph_id, class_id)` entries.
+fn parse_gpos_class_def(cls: &[u8]) -> HashMap<u16, u16> {
+    let mut map = HashMap::new();
+    let Ok(format) = read_u16_be(cls, 0) else {
+        return map;
+    };
+    if format == 1 {
+        let (Ok(start_gid), Ok(count)) = (read_u16_be(cls, 2), read_u16_be(cls, 4)) else {
+            return map;
+        };
+        let n = (count as usize).min(4096);
+        if 6 + n * 2 > cls.len() {
+            return map;
+        }
+        for i in 0..n {
+            if let Ok(c) = read_u16_be(cls, 6 + i * 2) {
+                if c != 0 {
+                    map.insert(start_gid.saturating_add(i as u16), c);
+                }
+            }
+        }
+    } else if format == 2 {
+        let Ok(range_count) = read_u16_be(cls, 2) else {
+            return map;
+        };
+        let n = (range_count as usize).min(1024);
+        if 4 + n * 6 > cls.len() {
+            return map;
+        }
+        for i in 0..n {
+            let rec = 4 + i * 6;
+            let (Ok(start_gid), Ok(end_gid), Ok(class_val)) = (
+                read_u16_be(cls, rec),
+                read_u16_be(cls, rec + 2),
+                read_u16_be(cls, rec + 4),
+            ) else {
+                break;
+            };
+            if class_val == 0 || end_gid < start_gid || (end_gid - start_gid) > 2048 {
+                continue;
+            }
+            for gid in start_gid..=end_gid {
+                map.insert(gid, class_val);
+            }
+        }
+    }
+    map
+}
+
+/// Parse one GPOS Lookup Type 2 (`PairPosFormat1` or `PairPosFormat2`) subtable.
+fn parse_gpos_pair_pos_subtable(sub: &[u8], out: &mut HashMap<(u16, u16), i16>) {
+    let Ok(pos_format) = read_u16_be(sub, 0) else {
+        return;
+    };
+    if pos_format == 1 {
+        if sub.len() < 10 {
+            return;
+        }
+        let (Ok(cov_off), Ok(vf1), Ok(vf2), Ok(pair_set_count)) = (
+            read_u16_be(sub, 2),
+            read_u16_be(sub, 4),
+            read_u16_be(sub, 6),
+            read_u16_be(sub, 8),
+        ) else {
+            return;
+        };
+        let Some(x_adv_off) = x_advance_offset_in_record(vf1) else {
+            return;
+        };
+        let cov_off = cov_off as usize;
+        let ps_count = (pair_set_count as usize).min(4096);
+        if cov_off >= sub.len() || 10 + ps_count * 2 > sub.len() {
+            return;
+        }
+        let rec_len = 2 + value_record_byte_len(vf1) + value_record_byte_len(vf2);
+        let coverage = parse_gpos_coverage(&sub[cov_off..]);
+        for (cov_idx, left_gid) in coverage {
+            if cov_idx >= ps_count {
+                continue;
+            }
+            let Ok(ps_off) = read_u16_be(sub, 10 + cov_idx * 2) else {
+                continue;
+            };
+            let ps_off = ps_off as usize;
+            if ps_off + 2 > sub.len() {
+                continue;
+            }
+            let Ok(pv_count) = read_u16_be(sub, ps_off) else {
+                continue;
+            };
+            let pv_count = (pv_count as usize).min(2048);
+            let mut p = ps_off + 2;
+            for _ in 0..pv_count {
+                if p + rec_len > sub.len() {
+                    break;
+                }
+                if let (Ok(right_gid), Ok(x_adv)) =
+                    (read_u16_be(sub, p), read_i16_be(sub, p + 2 + x_adv_off))
+                {
+                    if x_adv != 0 {
+                        out.insert((left_gid, right_gid), x_adv);
+                    }
+                }
+                p += rec_len;
+            }
+        }
+    } else if pos_format == 2 {
+        if sub.len() < 16 {
+            return;
+        }
+        let (Ok(cov_off), Ok(vf1), Ok(vf2), Ok(cd1_off), Ok(cd2_off), Ok(c1_cnt), Ok(c2_cnt)) = (
+            read_u16_be(sub, 2),
+            read_u16_be(sub, 4),
+            read_u16_be(sub, 6),
+            read_u16_be(sub, 8),
+            read_u16_be(sub, 10),
+            read_u16_be(sub, 12),
+            read_u16_be(sub, 14),
+        ) else {
+            return;
+        };
+        let Some(x_adv_off) = x_advance_offset_in_record(vf1) else {
+            return;
+        };
+        let cov_off = cov_off as usize;
+        let cd1_off = cd1_off as usize;
+        let cd2_off = cd2_off as usize;
+        if cov_off >= sub.len() || cd1_off >= sub.len() || cd2_off >= sub.len() {
+            return;
+        }
+        let c1_cnt = (c1_cnt as usize).min(512);
+        let c2_cnt = (c2_cnt as usize).min(512);
+        let cell_len = value_record_byte_len(vf1) + value_record_byte_len(vf2);
+        if cell_len == 0 || 16 + c1_cnt * c2_cnt * cell_len > sub.len() {
+            return;
+        }
+        let coverage = parse_gpos_coverage(&sub[cov_off..]);
+        let class1 = parse_gpos_class_def(&sub[cd1_off..]);
+        let class2 = parse_gpos_class_def(&sub[cd2_off..]);
+
+        let mut class2_by_id: HashMap<u16, Vec<u16>> = HashMap::new();
+        for (&gid, &cid) in &class2 {
+            class2_by_id.entry(cid).or_default().push(gid);
+        }
+
+        for (_, left_gid) in coverage {
+            let c1 = class1.get(&left_gid).copied().unwrap_or(0) as usize;
+            if c1 >= c1_cnt {
+                continue;
+            }
+            for c2 in 1..c2_cnt {
+                let cell_off = 16 + (c1 * c2_cnt + c2) * cell_len;
+                let Ok(x_adv) = read_i16_be(sub, cell_off + x_adv_off) else {
+                    continue;
+                };
+                if x_adv == 0 {
+                    continue;
+                }
+                if let Some(right_gids) = class2_by_id.get(&(c2 as u16)) {
+                    for &right_gid in right_gids {
+                        out.insert((left_gid, right_gid), x_adv);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Walk OpenType `GPOS` LookupList for Lookup Type 2 (`PairPosFormat1` and `PairPosFormat2`)
+/// and Lookup Type 9 (Extension Positioning wrapping Type 2) kerning adjustments.
+fn parse_gpos(gpos: &[u8], out: &mut HashMap<(u16, u16), i16>) {
+    if gpos.len() < 10 {
+        return;
+    }
+    let (Ok(major), Ok(minor), Ok(lookup_list_off)) = (
+        read_u16_be(gpos, 0),
+        read_u16_be(gpos, 2),
+        read_u16_be(gpos, 8),
+    ) else {
+        return;
+    };
+    if major != 1 || (minor != 0 && minor != 1) {
+        return;
+    }
+    let ll_off = lookup_list_off as usize;
+    if ll_off + 2 > gpos.len() {
+        return;
+    }
+    let Ok(lookup_count) = read_u16_be(gpos, ll_off) else {
+        return;
+    };
+    let n_lookups = (lookup_count as usize).min(256);
+    if ll_off + 2 + n_lookups * 2 > gpos.len() {
+        return;
+    }
+
+    for i in 0..n_lookups {
+        let Ok(l_rel) = read_u16_be(gpos, ll_off + 2 + i * 2) else {
+            continue;
+        };
+        let l_off = ll_off + (l_rel as usize);
+        if l_off + 6 > gpos.len() {
+            continue;
+        }
+        let (Ok(lookup_type), Ok(sub_count)) =
+            (read_u16_be(gpos, l_off), read_u16_be(gpos, l_off + 4))
+        else {
+            continue;
+        };
+        let n_subs = (sub_count as usize).min(128);
+        if l_off + 6 + n_subs * 2 > gpos.len() {
+            continue;
+        }
+        for s in 0..n_subs {
+            let Ok(sub_rel) = read_u16_be(gpos, l_off + 6 + s * 2) else {
+                continue;
+            };
+            let sub_off = l_off + (sub_rel as usize);
+            if sub_off >= gpos.len() {
+                continue;
+            }
+            if lookup_type == 2 {
+                parse_gpos_pair_pos_subtable(&gpos[sub_off..], out);
+            } else if lookup_type == 9 && sub_off + 8 <= gpos.len() {
+                let (Ok(ext_fmt), Ok(ext_type), Ok(ext_off)) = (
+                    read_u16_be(gpos, sub_off),
+                    read_u16_be(gpos, sub_off + 2),
+                    read_u32_be(gpos, sub_off + 4),
+                ) else {
+                    continue;
+                };
+                if ext_fmt == 1 && ext_type == 2 {
+                    let target = sub_off.saturating_add(ext_off as usize);
+                    if target < gpos.len() {
+                        parse_gpos_pair_pos_subtable(&gpos[target..], out);
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Read a big-endian `u16` at `offset`, or [`TtfError::UnexpectedEof`].
@@ -1182,6 +1568,90 @@ fn flatten_contour(points: &[OutlinePoint], scale: f32) -> Vec<(f32, f32)> {
     poly
 }
 
+/// Subdivide a quadratic Bezier segment `(p0, c, p2)` into `steps` linear vertices (`t = 0` included, `t = 1` omitted).
+pub fn flatten_quad_bezier(
+    p0: (f32, f32),
+    c: (f32, f32),
+    p2: (f32, f32),
+    steps: usize,
+    out: &mut Vec<(f32, f32)>,
+) {
+    let steps = steps.max(1);
+    for s in 0..steps {
+        let t = (s as f32) / (steps as f32);
+        let inv = 1.0 - t;
+        let x = inv * inv * p0.0 + 2.0 * inv * t * c.0 + t * t * p2.0;
+        let y = inv * inv * p0.1 + 2.0 * inv * t * c.1 + t * t * p2.1;
+        out.push((x, y));
+    }
+}
+
+/// Subdivide a cubic Bezier segment `(p0, c1, c2, p3)` into `steps` linear vertices (`t = 0` included, `t = 1` omitted).
+pub fn flatten_cubic_bezier(
+    p0: (f32, f32),
+    c1: (f32, f32),
+    c2: (f32, f32),
+    p3: (f32, f32),
+    steps: usize,
+    out: &mut Vec<(f32, f32)>,
+) {
+    let steps = steps.max(1);
+    for s in 0..steps {
+        let t = (s as f32) / (steps as f32);
+        let inv = 1.0 - t;
+        let b0 = inv * inv * inv;
+        let b1 = 3.0 * inv * inv * t;
+        let b2 = 3.0 * inv * t * t;
+        let b3 = t * t * t;
+        let x = b0 * p0.0 + b1 * c1.0 + b2 * c2.0 + b3 * p3.0;
+        let y = b0 * p0.1 + b1 * c1.1 + b2 * c2.1 + b3 * p3.1;
+        out.push((x, y));
+    }
+}
+
+/// Flatten a mixed contour containing `OnCurve`, `QuadraticOffCurve`, and `CubicOffCurve` control points.
+pub fn flatten_cubic_contour(points: &[(f32, f32, CurveOrder)]) -> Vec<(f32, f32)> {
+    if points.len() < 2 {
+        return Vec::new();
+    }
+    let first_on = points
+        .iter()
+        .position(|p| p.2 == CurveOrder::OnCurve)
+        .unwrap_or(0);
+    let mut poly = Vec::new();
+    let len = points.len();
+    let mut idx = 0usize;
+    while idx < len {
+        let p0 = points[(first_on + idx) % len];
+        let p1 = points[(first_on + idx + 1) % len];
+        match p1.2 {
+            CurveOrder::OnCurve => {
+                poly.push((p0.0, p0.1));
+                idx += 1;
+            }
+            CurveOrder::QuadraticOffCurve => {
+                let p2 = points[(first_on + idx + 2) % len];
+                flatten_quad_bezier((p0.0, p0.1), (p1.0, p1.1), (p2.0, p2.1), 6, &mut poly);
+                idx += 2;
+            }
+            CurveOrder::CubicOffCurve => {
+                let c2 = points[(first_on + idx + 2) % len];
+                let p3 = points[(first_on + idx + 3) % len];
+                flatten_cubic_bezier(
+                    (p0.0, p0.1),
+                    (p1.0, p1.1),
+                    (c2.0, c2.1),
+                    (p3.0, p3.1),
+                    8,
+                    &mut poly,
+                );
+                idx += 3;
+            }
+        }
+    }
+    poly
+}
+
 /// Fill `outline` with nonzero winding and 4 by 4 coverage samples.
 ///
 /// Contours are flattened, then closed. An edge whose Y delta is at most
@@ -1294,6 +1764,131 @@ fn rasterize_outline(outline: &GlyphOutline, scale: f32, advance_px: f32) -> Opt
         bearing_y: -y0,
         advance_px,
         coverage,
+    })
+}
+
+/// Fill `outline` at 3x horizontal RGB subpixel resolution (12 by 4 samples per pixel)
+/// and apply a `[1, 2, 1] / 4` horizontal FIR filter across subpixel columns.
+fn rasterize_outline_subpixel_lcd(
+    outline: &GlyphOutline,
+    scale: f32,
+    advance_px: f32,
+) -> Option<SubpixelGlyphBitmap> {
+    let mut segments: Vec<((f32, f32), (f32, f32))> = Vec::new();
+    let mut min_x = f32::INFINITY;
+    let mut min_y = f32::INFINITY;
+    let mut max_x = f32::NEG_INFINITY;
+    let mut max_y = f32::NEG_INFINITY;
+
+    for contour in &outline.contours {
+        let poly = flatten_contour(contour, scale);
+        if poly.len() < 2 {
+            continue;
+        }
+        for i in 0..poly.len() {
+            let a = poly[i];
+            let b = poly[(i + 1) % poly.len()];
+            min_x = min_x.min(a.0).min(b.0);
+            min_y = min_y.min(a.1).min(b.1);
+            max_x = max_x.max(a.0).max(b.0);
+            max_y = max_y.max(a.1).max(b.1);
+            if (a.1 - b.1).abs() > 1e-5 {
+                segments.push((a, b));
+            }
+        }
+    }
+    if segments.is_empty() || !min_x.is_finite() {
+        return None;
+    }
+
+    let x0 = min_x.floor() as i32;
+    let y0 = min_y.floor() as i32;
+    let x1 = max_x.ceil() as i32;
+    let y1 = max_y.ceil() as i32;
+    let width = (x1 - x0).max(1) as u32;
+    let height = (y1 - y0).max(1) as u32;
+    if width > 512 || height > 512 {
+        return None;
+    }
+
+    let sub_cols = (width as usize) * 3;
+    let mut rgb_coverage = vec![0u8; sub_cols * (height as usize)];
+    const SUB_X_PER_CHANNEL: usize = 4;
+    const SUB_Y: usize = 4;
+
+    for py in 0..height {
+        let mut raw_sub = vec![0u8; sub_cols];
+        for sy in 0..SUB_Y {
+            let sample_y = (y0 as f32) + (py as f32) + ((sy as f32) + 0.5) / (SUB_Y as f32);
+            let mut crossings: Vec<(f32, i32)> = Vec::new();
+            for &(a, b) in &segments {
+                let (ymin, ymax, dir) = if a.1 < b.1 {
+                    (a.1, b.1, 1)
+                } else {
+                    (b.1, a.1, -1)
+                };
+                if sample_y >= ymin && sample_y < ymax {
+                    let t = (sample_y - a.1) / (b.1 - a.1);
+                    let ix = a.0 + t * (b.0 - a.0);
+                    crossings.push((ix, dir));
+                }
+            }
+            if crossings.is_empty() {
+                continue;
+            }
+            crossings.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+            for col in 0..sub_cols {
+                for sx in 0..SUB_X_PER_CHANNEL {
+                    let sub_idx = col * SUB_X_PER_CHANNEL + sx;
+                    let sample_x =
+                        (x0 as f32) + ((sub_idx as f32) + 0.5) / ((3 * SUB_X_PER_CHANNEL) as f32);
+                    let mut winding = 0i32;
+                    for &(cx, dir) in &crossings {
+                        if cx <= sample_x {
+                            winding += dir;
+                        } else {
+                            break;
+                        }
+                    }
+                    if winding != 0 {
+                        raw_sub[col] += 1;
+                    }
+                }
+            }
+        }
+
+        let mut unfiltered = vec![0u32; sub_cols];
+        for col in 0..sub_cols {
+            let hits = u32::from(raw_sub[col]);
+            unfiltered[col] = ((hits * 255 + 8) / 16).min(255);
+        }
+
+        // 3-tap [1, 2, 1] / 4 horizontal FIR filter across subpixel columns.
+        let row_base = (py as usize) * sub_cols;
+        for col in 0..sub_cols {
+            let left = if col > 0 {
+                unfiltered[col - 1]
+            } else {
+                unfiltered[col]
+            };
+            let center = unfiltered[col];
+            let right = if col + 1 < sub_cols {
+                unfiltered[col + 1]
+            } else {
+                unfiltered[col]
+            };
+            rgb_coverage[row_base + col] = ((left + center * 2 + right + 2) / 4).min(255) as u8;
+        }
+    }
+
+    Some(SubpixelGlyphBitmap {
+        width,
+        height,
+        bearing_x: x0,
+        bearing_y: -y0,
+        advance_px,
+        rgb_coverage,
     })
 }
 
@@ -1443,5 +2038,66 @@ mod tests {
         let bitmap = font.rasterize_glyph('A', 20.0).expect("rasterized A");
         assert!(bitmap.width >= 10 && bitmap.height >= 12);
         assert!(bitmap.coverage.iter().any(|&alpha| alpha == 255));
+    }
+
+    #[test]
+    fn parses_gpos_pair_pos_kerning_cubic_contours_and_subpixel_lcd_glyphs() {
+        let mut gpos = Vec::new();
+        // GPOS v1.0 header (10 bytes): major=1, minor=0, scriptList=0, featureList=0, lookupList=10
+        gpos.extend_from_slice(&1u16.to_be_bytes());
+        gpos.extend_from_slice(&0u16.to_be_bytes());
+        gpos.extend_from_slice(&0u16.to_be_bytes());
+        gpos.extend_from_slice(&0u16.to_be_bytes());
+        gpos.extend_from_slice(&10u16.to_be_bytes());
+        // LookupList at offset 10: lookupCount=1, lookupOffsets[0]=4 (offset 14)
+        gpos.extend_from_slice(&1u16.to_be_bytes());
+        gpos.extend_from_slice(&4u16.to_be_bytes());
+        // Lookup at offset 14: lookupType=2 (PairPos), lookupFlag=0, subTableCount=1, subtableOffsets[0]=8 (offset 22)
+        gpos.extend_from_slice(&2u16.to_be_bytes());
+        gpos.extend_from_slice(&0u16.to_be_bytes());
+        gpos.extend_from_slice(&1u16.to_be_bytes());
+        gpos.extend_from_slice(&8u16.to_be_bytes());
+        // PairPosFormat1 at offset 22:
+        // posFormat=1, coverageOffset=12 (offset 34), valueFormat1=0x0004 (XAdvance), valueFormat2=0, pairSetCount=1, pairSetOffset[0]=18 (offset 40)
+        gpos.extend_from_slice(&1u16.to_be_bytes());
+        gpos.extend_from_slice(&12u16.to_be_bytes());
+        gpos.extend_from_slice(&0x0004u16.to_be_bytes());
+        gpos.extend_from_slice(&0u16.to_be_bytes());
+        gpos.extend_from_slice(&1u16.to_be_bytes());
+        gpos.extend_from_slice(&18u16.to_be_bytes());
+        // Coverage Format 1 at offset 34 (6 bytes): coverageFormat=1, glyphCount=1, glyphArray[0]=1 ('A')
+        gpos.extend_from_slice(&1u16.to_be_bytes());
+        gpos.extend_from_slice(&1u16.to_be_bytes());
+        gpos.extend_from_slice(&1u16.to_be_bytes());
+        // PairSet at offset 40 (6 bytes): pairValueCount=1, secondGlyph=2 ('i'), value1.xAdvance=-80
+        gpos.extend_from_slice(&1u16.to_be_bytes());
+        gpos.extend_from_slice(&2u16.to_be_bytes());
+        gpos.extend_from_slice(&(-80i16).to_be_bytes());
+
+        let mut pairs = HashMap::new();
+        parse_gpos(&gpos, &mut pairs);
+        assert_eq!(pairs.get(&(1, 2)), Some(&-80));
+
+        // Cubic contour flattening
+        let cubic_pts = [
+            (0.0, 0.0, CurveOrder::OnCurve),
+            (4.0, 10.0, CurveOrder::CubicOffCurve),
+            (8.0, 10.0, CurveOrder::CubicOffCurve),
+            (12.0, 0.0, CurveOrder::OnCurve),
+        ];
+        let poly = flatten_cubic_contour(&cubic_pts);
+        assert_eq!(poly.len(), 9);
+
+        // 3x horizontal subpixel LCD coverage rasterization
+        let bytes = build_minimal_synthetic_ttf();
+        let font = TtfFont::parse(&bytes).unwrap();
+        let lcd = font
+            .rasterize_glyph_subpixel_lcd('A', 20.0)
+            .expect("subpixel LCD A");
+        assert_eq!(
+            lcd.rgb_coverage.len(),
+            (lcd.width * lcd.height * 3) as usize
+        );
+        assert!(lcd.rgb_coverage.iter().any(|&v| v == 255));
     }
 }
