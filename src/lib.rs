@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+// Copyright (c) 2026 Buntato
 //! TrueType and OpenType SFNT parser, glyph outlines, and an 8-bit coverage rasterizer.
 //!
 //! Tables read from the font are `name`, `head`, `hhea`, `maxp`, `cmap`, `hmtx`,
