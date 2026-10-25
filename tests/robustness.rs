@@ -325,7 +325,7 @@ fn exercise_font(input: &[u8]) {
         let _ = font.glyph_metric(gid);
         let _ = font.kerning_units(gid, font.glyph_id('C'));
         let _ = font.glyph_outline(gid);
-        for size in [0.0f32, 1.0, 16.0, 97.5] {
+        for size in [0.0f32, 1.0, 16.0, 97.5, 1e9, f32::MAX, f32::NAN] {
             let _ = font.glyph_advance_px(ch, size);
             let _ = font.rasterize_glyph(ch, size);
             let _ = font.rasterize_glyph_subpixel_lcd(ch, size);
@@ -399,4 +399,133 @@ fn random_charstrings_do_not_panic() {
         let subrs: [&[u8]; 2] = [program, &[11]];
         let _ = interpret_type2_charstring_with_subrs(program, &subrs, &subrs);
     });
+}
+
+/// Font sizes that used to overflow the glyph bounds: zero, negative, NaN,
+/// infinities, and sizes far past the 512 pixel bitmap limit.
+const EXTREME_SIZES: [f32; 16] = [
+    0.0,
+    -0.0,
+    -1.0,
+    -1e30,
+    f32::NAN,
+    f32::INFINITY,
+    f32::NEG_INFINITY,
+    f32::MIN_POSITIVE,
+    512.0,
+    1e5,
+    1e6,
+    1e9,
+    2_147_483_647.0,
+    1e30,
+    f32::MAX,
+    f32::MIN,
+];
+
+fn check_bitmap_sizes(font: &TtfFont, ch: char, size: f32) {
+    if let Some(bmp) = font.rasterize_glyph(ch, size) {
+        assert!(bmp.width <= 512 && bmp.height <= 512, "{ch:?} at {size}");
+        assert_eq!(bmp.coverage.len(), (bmp.width * bmp.height) as usize);
+        assert!(bmp.advance_px.is_finite(), "{ch:?} at {size}");
+    }
+    if let Some(bmp) = font.rasterize_glyph_subpixel_lcd(ch, size) {
+        assert!(bmp.width <= 512 && bmp.height <= 512, "{ch:?} at {size}");
+        assert!(bmp.advance_px.is_finite(), "{ch:?} at {size}");
+    }
+}
+
+#[test]
+fn extreme_font_sizes_do_not_overflow() {
+    let font = TtfFont::parse(&sample_font()).expect("sample font parses");
+    for size in EXTREME_SIZES {
+        for ch in ['A', 'B', 'C', 'D'] {
+            check_bitmap_sizes(&font, ch, size);
+            let _ = font.glyph_advance_px(ch, size);
+        }
+        let _ = font.measure_text("ABCD", size);
+        let _ = font.line_height_px(size);
+    }
+    // A size the bitmap can hold still draws.
+    assert!(font.rasterize_glyph('B', 300.0).is_some());
+    assert!(
+        font.rasterize_glyph('C', 300.0).is_some(),
+        "composite glyph"
+    );
+}
+
+/// First four bytes: an `f32` font size. The rest: a font (the sample font
+/// when empty). Every glyph is measured and drawn at that size.
+fn exercise_size(input: &[u8]) {
+    let Some((size, rest)) = input.split_first_chunk::<4>() else {
+        return;
+    };
+    let size = f32::from_le_bytes(*size);
+    let owned;
+    let bytes = if rest.is_empty() {
+        owned = sample_font();
+        &owned[..]
+    } else {
+        rest
+    };
+    let Ok(font) = TtfFont::parse(bytes) else {
+        return;
+    };
+    for ch in ['A', 'B', 'C', 'D', 'E'] {
+        check_bitmap_sizes(&font, ch, size);
+        let _ = font.glyph_advance_px(ch, size);
+    }
+    let _ = font.measure_text("ABCD", size);
+    let _ = font.line_height_px(size);
+}
+
+/// A size near the bitmap limit, a fixed extreme, any bit pattern, or a
+/// power of ten up to 1e38, with either sign.
+fn random_size(rng: &mut Rng) -> f32 {
+    let size = match rng.below(4) {
+        0 => rng.pick(&EXTREME_SIZES),
+        1 => f32::from_bits(rng.next_u64() as u32),
+        2 => 10f32.powi(rng.below(39) as i32) * (1.0 + rng.below(1000) as f32 / 1000.0),
+        _ => 400.0 + rng.below(400) as f32 + rng.below(1000) as f32 / 1000.0,
+    };
+    if rng.one_in(4) { -size } else { size }
+}
+
+#[test]
+fn random_font_sizes_do_not_overflow() {
+    run_cases(
+        "ttf-sizes",
+        0x5349_5a45,
+        |rng| random_size(rng).to_le_bytes().to_vec(),
+        exercise_size,
+    );
+}
+
+#[test]
+fn mutated_fonts_at_extreme_sizes_do_not_overflow() {
+    let font = sample_font();
+    run_cases(
+        "ttf-mutated-sizes",
+        0x4d55_5453,
+        move |rng| {
+            let mut input = random_size(rng).to_le_bytes().to_vec();
+            input.extend(mutate(rng, &font));
+            input
+        },
+        exercise_size,
+    );
+}
+
+#[test]
+fn system_font_glyphs_at_extreme_sizes_do_not_overflow() {
+    // Real outlines when the machine has a font. Skipped quietly otherwise.
+    for (bold, mono) in [(false, false), (true, false), (false, true)] {
+        let Some(font) = TtfFont::load_system_font(bold, mono) else {
+            continue;
+        };
+        for size in EXTREME_SIZES {
+            for ch in ['H', 'g', '@', '\u{e9}', '\u{c5}', 'W'] {
+                check_bitmap_sizes(&font, ch, size);
+            }
+        }
+    }
 }

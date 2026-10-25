@@ -505,12 +505,16 @@ impl TtfFont {
 
     /// Rasterize `ch` at `font_size_px` into an 8-bit coverage bitmap.
     ///
-    /// Returns [`None`] when the character has no contours, or when the bitmap
-    /// would be empty or larger than 512 pixels on a side. The outline is scaled
+    /// Returns [`None`] when the character has no contours, when `font_size_px`
+    /// is NaN or infinite, or when the bitmap would be empty, larger than 512
+    /// pixels on a side, or more than 2^24 pixels from the pen. The outline is scaled
     /// by `max(font_size_px, 1) / max(units_per_em, 1)` and filled with nonzero
     /// winding at 4 by 4 samples per pixel. See [`GlyphBitmap`] for coverage
     /// and y direction. anvil-raster uses this for Linux glyphs.
     pub fn rasterize_glyph(&self, ch: char, font_size_px: f32) -> Option<GlyphBitmap> {
+        if !font_size_px.is_finite() {
+            return None;
+        }
         let gid = self.glyph_id(ch);
         let outline = self.glyph_outline(gid)?;
         if outline.contours.is_empty() {
@@ -530,6 +534,9 @@ impl TtfFont {
         ch: char,
         font_size_px: f32,
     ) -> Option<SubpixelGlyphBitmap> {
+        if !font_size_px.is_finite() {
+            return None;
+        }
         let gid = self.glyph_id(ch);
         let outline = self.glyph_outline(gid)?;
         if outline.contours.is_empty() {
@@ -2223,6 +2230,41 @@ pub fn flatten_cubic_contour(points: &[(f32, f32, CurveOrder)]) -> Vec<(f32, f32
     poly
 }
 
+/// Largest bitmap side, in pixels, either rasterizer returns.
+const MAX_GLYPH_BITMAP_SIDE: f32 = 512.0;
+
+/// Largest distance, in pixels, of a glyph bitmap's corner from the pen.
+/// Well inside `i32`, and small enough that every whole pixel position
+/// near it is exact in `f32`.
+const MAX_GLYPH_OFFSET: f32 = 16_777_216.0;
+
+/// Pixel box `(x0, y0, width, height)` around scaled outline bounds.
+///
+/// Returns [`None`] when a bound is not finite, when a side is larger than
+/// 512 pixels, or when the box sits more than 2^24 pixels from the pen. The
+/// sides are measured in `f32` before any integer conversion, so outlines
+/// scaled far past the bitmap limit can't overflow or wrap.
+fn pixel_bounds(min_x: f32, min_y: f32, max_x: f32, max_y: f32) -> Option<(i32, i32, u32, u32)> {
+    let (left, top, right, bottom) = (min_x.floor(), min_y.floor(), max_x.ceil(), max_y.ceil());
+    if ![left, top, right, bottom].iter().all(|v| v.is_finite()) {
+        return None;
+    }
+    let (w, h) = (right - left, bottom - top);
+    // `!(a <= b)` is also true for NaN.
+    if !(w <= MAX_GLYPH_BITMAP_SIDE && h <= MAX_GLYPH_BITMAP_SIDE) {
+        return None;
+    }
+    if !(left.abs() <= MAX_GLYPH_OFFSET && top.abs() <= MAX_GLYPH_OFFSET) {
+        return None;
+    }
+    Some((
+        left as i32,
+        top as i32,
+        (w as u32).max(1),
+        (h as u32).max(1),
+    ))
+}
+
 /// Fill `outline` with nonzero winding and 4 by 4 coverage samples.
 ///
 /// Contours are flattened, then closed. An edge whose Y delta is at most
@@ -2260,19 +2302,10 @@ fn rasterize_outline(outline: &GlyphOutline, scale: f32, advance_px: f32) -> Opt
             }
         }
     }
-    if segments.is_empty() || !min_x.is_finite() {
+    if segments.is_empty() {
         return None;
     }
-
-    let x0 = min_x.floor() as i32;
-    let y0 = min_y.floor() as i32;
-    let x1 = max_x.ceil() as i32;
-    let y1 = max_y.ceil() as i32;
-    let width = (x1 - x0).max(1) as u32;
-    let height = (y1 - y0).max(1) as u32;
-    if width > 512 || height > 512 {
-        return None;
-    }
+    let (x0, y0, width, height) = pixel_bounds(min_x, min_y, max_x, max_y)?;
 
     let mut coverage = vec![0u8; (width * height) as usize];
     // 4 by 4 subpixels. The coverage divisor below is SUB * SUB, which is 16.
@@ -2368,19 +2401,10 @@ fn rasterize_outline_subpixel_lcd(
             }
         }
     }
-    if segments.is_empty() || !min_x.is_finite() {
+    if segments.is_empty() {
         return None;
     }
-
-    let x0 = min_x.floor() as i32;
-    let y0 = min_y.floor() as i32;
-    let x1 = max_x.ceil() as i32;
-    let y1 = max_y.ceil() as i32;
-    let width = (x1 - x0).max(1) as u32;
-    let height = (y1 - y0).max(1) as u32;
-    if width > 512 || height > 512 {
-        return None;
-    }
+    let (x0, y0, width, height) = pixel_bounds(min_x, min_y, max_x, max_y)?;
 
     let sub_cols = (width as usize) * 3;
     let mut rgb_coverage = vec![0u8; sub_cols * (height as usize)];
