@@ -16,9 +16,9 @@ The browser uses `TtfFont::parse` on Linux when a system `.ttf` is installed. If
 
 ## What it does
 
-- `TtfFont::parse` reads an SFNT file: `name`, `head`, `hhea`, `maxp`, `cmap` (formats 4 and 12), `hmtx`, `kern` format 0, OpenType `GPOS` Lookup Type 2 (`PairPosFormat1` and `PairPosFormat2`), `loca` + `glyf`, and OpenType `CFF ` (Compact Font Format 1.0 INDEX, Top DICT, and Type 2 CharString interpreter).
-- Simple, compound, and `CFF ` Type 2 CharString (`rmoveto`, `hmoveto`, `vmoveto`, `rlineto`, `hlineto`, `vlineto`, `rrcurveto`, `hhcurveto`, `vvcurveto`, `hvcurveto`, `vhcurveto`, `rcurveline`, `rlinecurve`) glyph outlines are decoded. Compound glyphs stop at depth 16.
-- `rasterize_glyph` returns an 8-bit coverage bitmap, and `rasterize_glyph_subpixel_lcd` returns a 3x horizontal RGB subpixel coverage bitmap with a 3-tap FIR filter.
+- `TtfFont::parse` reads an SFNT file: `name`, `head`, `hhea`, `maxp`, `cmap` (formats 4 and 12), `hmtx`, `kern` format 0, `GPOS` pair kerning (Lookup Type 2), `loca` + `glyf`, and `CFF ` outlines.
+- Simple, compound, and `CFF ` Type 2 glyph outlines are decoded. Compound glyphs stop at depth 16.
+- `rasterize_glyph` returns an 8-bit grayscale coverage bitmap. `rasterize_glyph_subpixel_lcd` returns an RGB subpixel coverage bitmap.
 - `measure_text` and `glyph_advance_px` return widths, including kerning when the font has it.
 - `load_system_font` looks for a font file on the machine.
 - `measure_proportional_fallback` estimates width when no font file is available.
