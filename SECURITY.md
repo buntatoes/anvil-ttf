@@ -14,5 +14,6 @@ Do not put the details in a public issue.
 
 - Files larger than 32 MiB are rejected.
 - Table count, contour count, point count, compound-glyph depth, and CFF Type 2 subroutine depth are capped (128 tables, 256 contours, 4096 points, depth 16).
+- A glyph bitmap is at most 512 pixels on a side and within 2^24 pixels of the pen. Larger, NaN, or infinite font sizes give no bitmap, and the bounds are checked before any integer conversion.
 
-Version 0.7.0 is current.
+Version 0.8.0 is current.

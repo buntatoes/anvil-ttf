@@ -10,7 +10,7 @@
   </p>
 </div>
 
-Version 0.7.0.
+Version 0.8.0.
 
 The browser uses `TtfFont::parse` on Linux when a system `.ttf` is installed. If parsing fails, text falls back to a built-in bitmap font in `anvil-raster`.
 
@@ -27,6 +27,7 @@ The browser uses `TtfFont::parse` on Linux when a system `.ttf` is installed. If
 
 - Font file size is capped at 32 MiB.
 - At most 128 SFNT tables, 256 contours per glyph, and 4096 points per glyph.
+- Glyph bitmaps are at most 512 pixels on a side. A larger font size, or a NaN or infinite one, draws no bitmap (`rasterize_glyph` returns `None`). Widths from `measure_text` and `glyph_advance_px` are still returned.
 
 ## Build
 
