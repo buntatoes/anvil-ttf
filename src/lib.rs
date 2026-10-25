@@ -1220,7 +1220,27 @@ fn flush_cff_contour(
 /// Supports Type 2 path operators (`rmoveto`, `hmoveto`, `vmoveto`, `rlineto`, `hlineto`, `vlineto`,
 /// `rrcurveto`, `hhcurveto`, `vvcurveto`, `hvcurveto`, `vhcurveto`, `rcurveline`, `rlinecurve`, `endchar`)
 /// and stem/hintmask operators (`hstem`, `vstem`, `hstemhm`, `vstemhm`, `hintmask`, `cntrmask`).
+fn cff_subr_bias(count: usize) -> i32 {
+    if count < 1240 {
+        107
+    } else if count < 33900 {
+        1131
+    } else {
+        32768
+    }
+}
+
+/// Interpret a Compact Font Format (`CFF ` / `CFF2`) Type 2 CharString bytecode program without subroutines.
 pub fn interpret_type2_charstring(program: &[u8]) -> Option<GlyphOutline> {
+    interpret_type2_charstring_with_subrs(program, &[], &[])
+}
+
+/// Interpret a Compact Font Format (`CFF ` / `CFF2`) Type 2 CharString program with local and global subroutines (`callsubr` / `callgsubr`).
+pub fn interpret_type2_charstring_with_subrs<'a>(
+    mut program: &'a [u8],
+    local_subrs: &[&'a [u8]],
+    global_subrs: &[&'a [u8]],
+) -> Option<GlyphOutline> {
     let mut stack: Vec<f32> = Vec::with_capacity(48);
     let mut contours: Vec<Vec<OutlinePoint>> = Vec::new();
     let mut current: Vec<(f32, f32, CurveOrder)> = Vec::new();
@@ -1229,7 +1249,19 @@ pub fn interpret_type2_charstring(program: &[u8]) -> Option<GlyphOutline> {
     let mut stem_hints = 0usize;
     let mut i = 0usize;
 
-    while i < program.len() {
+    let mut call_stack: Vec<(&'a [u8], usize)> = Vec::new();
+    let local_bias = cff_subr_bias(local_subrs.len());
+    let global_bias = cff_subr_bias(global_subrs.len());
+
+    loop {
+        if i >= program.len() {
+            if let Some((caller_prog, caller_i)) = call_stack.pop() {
+                program = caller_prog;
+                i = caller_i;
+                continue;
+            }
+            break;
+        }
         let b0 = program[i];
         i += 1;
         match b0 {
@@ -1494,6 +1526,28 @@ pub fn interpret_type2_charstring(program: &[u8]) -> Option<GlyphOutline> {
                 }
                 stack.clear();
             }
+            10 | 29 => {
+                // callsubr (10) or callgsubr (29)
+                if let Some(biased) = stack.pop() {
+                    let (subrs, bias) = if b0 == 10 {
+                        (local_subrs, local_bias)
+                    } else {
+                        (global_subrs, global_bias)
+                    };
+                    let idx = (biased.round() as i32) + bias;
+                    if idx >= 0 && call_stack.len() < 16 {
+                        if let Some(&subr_bytes) = subrs.get(idx as usize) {
+                            call_stack.push((program, i));
+                            program = subr_bytes;
+                            i = 0;
+                        }
+                    }
+                }
+            }
+            11 => {
+                // return from subroutine
+                i = program.len();
+            }
             14 => {
                 // endchar
                 flush_cff_contour(&mut current, &mut contours);
@@ -1585,7 +1639,7 @@ fn parse_cff_index<'a>(cff: &'a [u8], start: usize) -> Option<(Vec<&'a [u8]>, us
 }
 
 /// Extract the `CharStrings` table offset (operator `17`) from a CFF Top DICT byte slice.
-fn parse_cff_top_dict_charstrings_offset(dict: &[u8]) -> Option<usize> {
+fn parse_cff_dict_operands(dict: &[u8], target_op: u8) -> Option<Vec<i32>> {
     let mut stack: Vec<i32> = Vec::with_capacity(16);
     let mut i = 0usize;
     while i < dict.len() {
@@ -1641,9 +1695,11 @@ fn parse_cff_top_dict_charstrings_offset(dict: &[u8]) -> Option<usize> {
                 }
                 stack.clear();
             }
-            17 => {
-                let off = *stack.last()?;
-                return (off > 0).then_some(off as usize);
+            op if op == target_op => {
+                return (!stack.is_empty()).then_some(stack);
+            }
+            255 => {
+                stack.clear();
             }
             _ => {
                 stack.clear();
@@ -1661,22 +1717,45 @@ fn parse_cff_table(cff: &[u8], num_glyphs: usize) -> Result<Vec<Option<GlyphOutl
     let hdr_size = usize::from(cff[2]);
     let (_, after_name_idx) =
         parse_cff_index(cff, hdr_size).ok_or(TtfError::InvalidTable("CFF "))?;
-    let (top_dicts, _) =
+    let (top_dicts, after_top_idx) =
         parse_cff_index(cff, after_name_idx).ok_or(TtfError::InvalidTable("CFF "))?;
     let top_dict = top_dicts
         .first()
         .copied()
         .ok_or(TtfError::InvalidTable("CFF "))?;
-    let charstrings_off =
-        parse_cff_top_dict_charstrings_offset(top_dict).ok_or(TtfError::InvalidTable("CFF "))?;
+    let charstrings_off = parse_cff_dict_operands(top_dict, 17)
+        .and_then(|ops| ops.last().copied())
+        .filter(|&off| off > 0)
+        .map(|off| off as usize)
+        .ok_or(TtfError::InvalidTable("CFF "))?;
     let (charstrings, _) =
         parse_cff_index(cff, charstrings_off).ok_or(TtfError::InvalidTable("CFF "))?;
 
+    let global_subrs = parse_cff_index(cff, after_top_idx)
+        .and_then(|(_, after_str_idx)| parse_cff_index(cff, after_str_idx))
+        .map(|(v, _)| v)
+        .unwrap_or_default();
+    let local_subrs = parse_cff_dict_operands(top_dict, 18)
+        .filter(|ops| ops.len() >= 2)
+        .and_then(|ops| {
+            let priv_size = ops[ops.len() - 2].max(0) as usize;
+            let priv_off = ops[ops.len() - 1].max(0) as usize;
+            let priv_end = priv_off.checked_add(priv_size)?;
+            if priv_end > cff.len() {
+                return None;
+            }
+            let subrs_rel =
+                *parse_cff_dict_operands(&cff[priv_off..priv_end], 19)?.last()? as usize;
+            let subrs_abs = priv_off.checked_add(subrs_rel)?;
+            parse_cff_index(cff, subrs_abs).map(|(v, _)| v)
+        })
+        .unwrap_or_default();
+
     let mut outlines = Vec::with_capacity(num_glyphs);
     for gid in 0..num_glyphs {
-        let outline = charstrings
-            .get(gid)
-            .and_then(|prog| interpret_type2_charstring(prog));
+        let outline = charstrings.get(gid).and_then(|prog| {
+            interpret_type2_charstring_with_subrs(prog, &local_subrs, &global_subrs)
+        });
         outlines.push(outline);
     }
     Ok(outlines)
@@ -2627,5 +2706,16 @@ mod tests {
         let cff_outlines = parse_cff_table(&cff, 2).expect("parse CFF table");
         assert!(cff_outlines[0].is_none());
         assert!(cff_outlines[1].is_some());
+
+        // Subroutine calls: bias for < 1240 subrs is 107, so index 0 is biased -107 (encoded as -107 + 139 = 32)
+        let local_sub0: &[u8] = &[189, 139, 21, 189, 6, 11]; // rmoveto(50, 0), hlineto(50), return
+        let global_sub0: &[u8] = &[189, 7, 89, 6, 14]; // vlineto(50), hlineto(-50), endchar
+        let main_with_subrs: &[u8] = &[32, 10, 32, 29]; // callsubr(0), callgsubr(0)
+        let subr_outline =
+            interpret_type2_charstring_with_subrs(main_with_subrs, &[local_sub0], &[global_sub0])
+                .expect("subr outline");
+        assert_eq!(subr_outline.contours.len(), 1);
+        assert_eq!(subr_outline.x_min, 50);
+        assert_eq!(subr_outline.x_max, 100);
     }
 }
