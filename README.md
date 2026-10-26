@@ -35,7 +35,7 @@ The browser uses `TtfFont::parse` on Linux and Windows when a system `.ttf` is i
 cargo test
 ```
 
-Rust 2024 edition, Rust 1.85.1 or newer. No crates.io dependencies.
+Rust 2024 edition, Rust 1.99.1 or newer. No crates.io dependencies.
 
 ## The other repositories
 
