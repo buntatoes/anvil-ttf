@@ -51,7 +51,11 @@ impl Rng {
 
     /// Value in `0..n`. Returns 0 when `n` is 0.
     fn below(&mut self, n: usize) -> usize {
-        if n == 0 { 0 } else { (self.next_u64() % n as u64) as usize }
+        if n == 0 {
+            0
+        } else {
+            (self.next_u64() % n as u64) as usize
+        }
     }
 
     fn byte(&mut self) -> u8 {
@@ -150,7 +154,10 @@ fn check_case(label: &str, case: usize, input: Vec<u8>, target: fn(&[u8])) {
         }
         Err(mpsc::RecvTimeoutError::Disconnected) => {
             let _ = handle.join();
-            panic!("{label}: case {case} panicked on input {}", preview(&shared));
+            panic!(
+                "{label}: case {case} panicked on input {}",
+                preview(&shared)
+            );
         }
         Err(mpsc::RecvTimeoutError::Timeout) => {
             panic!(
@@ -163,7 +170,12 @@ fn check_case(label: &str, case: usize, input: Vec<u8>, target: fn(&[u8])) {
 }
 
 /// Generate cases from `seed` until the budget is spent and check each one.
-fn run_cases(label: &str, seed: u64, mut generate: impl FnMut(&mut Rng) -> Vec<u8>, target: fn(&[u8])) {
+fn run_cases(
+    label: &str,
+    seed: u64,
+    mut generate: impl FnMut(&mut Rng) -> Vec<u8>,
+    target: fn(&[u8]),
+) {
     let mut rng = Rng::new(seed);
     let budget = test_budget();
     let started = Instant::now();
@@ -320,7 +332,17 @@ fn exercise_font(input: &[u8]) {
         return;
     };
     let _ = font.family_name();
-    for ch in ['A', 'B', 'C', 'D', 'E', ' ', '\u{e9}', '\u{FFFF}', '\u{1F600}'] {
+    for ch in [
+        'A',
+        'B',
+        'C',
+        'D',
+        'E',
+        ' ',
+        '\u{e9}',
+        '\u{FFFF}',
+        '\u{1F600}',
+    ] {
         let gid = font.glyph_id(ch);
         let _ = font.glyph_metric(gid);
         let _ = font.kerning_units(gid, font.glyph_id('C'));
@@ -350,55 +372,83 @@ fn sample_font_parses() {
 
 #[test]
 fn random_bytes_do_not_panic() {
-    run_cases("ttf-random", 31, |rng| {
-        let mut input = rng.bytes(512);
-        if input.len() >= 4 {
-            let tag = rng.pick(&[0x0001_0000u32, 0x7472_7565, 0x4F54_544F]);
-            input[..4].copy_from_slice(&tag.to_be_bytes());
-        }
-        input
-    }, exercise_font);
+    run_cases(
+        "ttf-random",
+        31,
+        |rng| {
+            let mut input = rng.bytes(512);
+            if input.len() >= 4 {
+                let tag = rng.pick(&[0x0001_0000u32, 0x7472_7565, 0x4F54_544F]);
+                input[..4].copy_from_slice(&tag.to_be_bytes());
+            }
+            input
+        },
+        exercise_font,
+    );
 }
 
 #[test]
 fn mutated_fonts_do_not_panic() {
     let font = sample_font();
-    run_cases("ttf-mutated", 32, move |rng| mutate(rng, &font), exercise_font);
+    run_cases(
+        "ttf-mutated",
+        32,
+        move |rng| mutate(rng, &font),
+        exercise_font,
+    );
 }
 
 #[test]
 fn mutated_table_directory_does_not_panic() {
     let font = sample_font();
-    run_cases("ttf-directory", 33, move |rng| {
-        let mut out = font.clone();
-        // Rewrite one offset or length field in the table directory.
-        let record = 12 + 16 * rng.below(9);
-        let field = record + 8 + 4 * rng.below(2);
-        let value = rng.pick(&[0u32, 1, 3, 0xFFFF, 0x7FFF_FFFF, 0xFFFF_FFFF, out.len() as u32]);
-        out[field..field + 4].copy_from_slice(&value.to_be_bytes());
-        out
-    }, exercise_font);
+    run_cases(
+        "ttf-directory",
+        33,
+        move |rng| {
+            let mut out = font.clone();
+            // Rewrite one offset or length field in the table directory.
+            let record = 12 + 16 * rng.below(9);
+            let field = record + 8 + 4 * rng.below(2);
+            let value = rng.pick(&[
+                0u32,
+                1,
+                3,
+                0xFFFF,
+                0x7FFF_FFFF,
+                0xFFFF_FFFF,
+                out.len() as u32,
+            ]);
+            out[field..field + 4].copy_from_slice(&value.to_be_bytes());
+            out
+        },
+        exercise_font,
+    );
 }
 
 #[test]
 fn random_charstrings_do_not_panic() {
-    run_cases("ttf-charstring", 34, |rng| {
-        let mut program = Vec::new();
-        for _ in 0..rng.below(64) {
-            if rng.one_in(3) {
-                // Operators 0..=31, including the escape byte 12.
-                program.push(rng.below(32) as u8);
-            } else {
-                // Small integer operands in the 32..=246 single-byte form.
-                program.push(32 + rng.below(215) as u8);
+    run_cases(
+        "ttf-charstring",
+        34,
+        |rng| {
+            let mut program = Vec::new();
+            for _ in 0..rng.below(64) {
+                if rng.one_in(3) {
+                    // Operators 0..=31, including the escape byte 12.
+                    program.push(rng.below(32) as u8);
+                } else {
+                    // Small integer operands in the 32..=246 single-byte form.
+                    program.push(32 + rng.below(215) as u8);
+                }
             }
-        }
-        program
-    }, |program| {
-        let _ = interpret_type2_charstring(program);
-        let subrs: [&[u8]; 2] = [program, &[11]];
-        let _ = interpret_type2_charstring_with_subrs(program, &subrs, &subrs);
-    });
+            program
+        },
+        |program| {
+            let _ = interpret_type2_charstring(program);
+            let subrs: [&[u8]; 2] = [program, &[11]];
+            let _ = interpret_type2_charstring_with_subrs(program, &subrs, &subrs);
+        },
+    );
 }
 
 /// Font sizes that used to overflow the glyph bounds: zero, negative, NaN,
