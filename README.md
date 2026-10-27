@@ -1,5 +1,5 @@
 <div align="center">
-  <h1>anvil-ttf</h1>
+  <h1>Anvil TTF</h1>
   <p>TrueType and OpenType, drawn to coverage bitmaps.</p>
   <p>
     <img src="https://img.shields.io/badge/release-v.08-e8c37a?style=flat-square" alt="v.08" />
