@@ -1,8 +1,8 @@
 <div align="center">
   <h1>Anvil TTF</h1>
-  <p>TrueType and OpenType, drawn to coverage bitmaps.</p>
+  <p>TrueType and OpenType, drawn to coverage bitmaps with vertical grid fitting and gamma-correct linear blending.</p>
   <p>
-    <img src="https://img.shields.io/badge/release-v.08-e8c37a?style=flat-square" alt="v.08" />
+    <img src="https://img.shields.io/badge/release-v.09-e8c37a?style=flat-square" alt="v.09" />
     <img src="https://img.shields.io/badge/status-Proof_of_Concept-d4a359?style=flat-square" alt="Proof of Concept" />
     <a href="./LICENSE"><img src="https://img.shields.io/badge/license-PolyForm_Noncommercial_1.0.0_%7C_Paid_Commercial_%28Non--Compete%29-blue?style=flat-square" alt="PolyForm Noncommercial 1.0.0 | Paid Commercial (Non-Compete)" /></a>
     <a href="./SECURITY.md"><img src="https://img.shields.io/badge/security-policy-2ea44f?style=flat-square" alt="Security" /></a>
@@ -10,23 +10,24 @@
   </p>
 </div>
 
-Version 0.8.1 (`v.08`).
+Version 0.9.0 (`v.09`).
 
 The browser uses `TtfFont::parse` on Linux and Windows when a system `.ttf` is installed. If parsing fails, text falls back to a built-in bitmap font in `anvil-raster`.
 
 ## What it does
 
 - `TtfFont::parse` reads an SFNT file: `name`, `head`, `hhea`, `maxp`, `cmap` (formats 4 and 12), `hmtx`, `kern` format 0, `GPOS` pair kerning (Lookup Type 2), `loca` + `glyf`, and `CFF ` outlines.
-- Simple, compound, and `CFF ` Type 2 glyph outlines (including `callsubr` and `callgsubr` subroutines) are decoded. Compound glyphs and subroutines stop at depth 16.
-- `rasterize_glyph` returns an 8-bit grayscale coverage bitmap. `rasterize_glyph_subpixel_lcd` returns an RGB subpixel coverage bitmap.
+- Simple, compound, and `CFF ` Type 2 glyph outlines (including `callsubr` and `callgsubr` subroutines) are decoded. Compound glyphs stop at depth 64.
+- `rasterize_glyph` and `rasterize_glyph_subpixel_positioned` return 8-bit grayscale coverage bitmaps with vertical stem grid fitting (snapping baselines and horizontal stems to integer pixel rows). `rasterize_glyph_subpixel_lcd` returns a 3x horizontal RGB subpixel coverage bitmap.
+- `srgb_to_linear_u12`, `linear_u12_to_srgb`, `enhance_stem_contrast`, `blend_glyph_pixel_gamma_correct`, and `blend_subpixel_lcd_gamma_correct` perform luminance-aware stem contrast enhancement and gamma-correct linear-space alpha blending.
 - `measure_text` and `glyph_advance_px` return widths, including kerning when the font has it.
 - `load_system_font` looks for a font file on the machine.
 - `measure_proportional_fallback` estimates width when no font file is available.
 
 ## Limits
 
-- Font file size is capped at 32 MiB.
-- At most 128 SFNT tables, 256 contours per glyph, and 4096 points per glyph.
+- Font file size is capped at 320 MiB.
+- At most 1,280 SFNT tables, 2,560 contours per glyph, and 40,960 points per glyph.
 - Glyph bitmaps are at most 512 pixels on a side. A larger font size, or a NaN or infinite one, draws no bitmap (`rasterize_glyph` returns `None`). Widths from `measure_text` and `glyph_advance_px` are still returned.
 
 ## Build

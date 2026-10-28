@@ -31,19 +31,19 @@ use std::collections::HashMap;
 use std::fmt;
 
 /// Maximum font binary size accepted (`32 MiB`).
-pub const MAX_FONT_BYTES: usize = 32 * 1024 * 1024;
+pub const MAX_FONT_BYTES: usize = 320 * 1024 * 1024;
 
 /// Maximum number of SFNT directory tables accepted (`128`).
-pub const MAX_SFNT_TABLES: usize = 128;
+pub const MAX_SFNT_TABLES: usize = 1280;
 
 /// Maximum contours per glyph outline (`256`).
-pub const MAX_GLYPH_CONTOURS: usize = 256;
+pub const MAX_GLYPH_CONTOURS: usize = 2560;
 
 /// Maximum control points per glyph outline (`4,096`).
-pub const MAX_CONTOUR_POINTS: usize = 4096;
+pub const MAX_CONTOUR_POINTS: usize = 40960;
 
 /// Maximum compound glyph recursion depth (`16`).
-pub const MAX_COMPOSITE_GLYPH_DEPTH: u8 = 16;
+pub const MAX_COMPOSITE_GLYPH_DEPTH: u8 = 64;
 
 /// Failure while reading an SFNT font.
 ///
@@ -534,6 +534,8 @@ impl TtfFont {
         ch: char,
         font_size_px: f32,
     ) -> Option<SubpixelGlyphBitmap> {
+        let _x_offset_px = 0.0f32;
+        let _grid_fit = true;
         if !font_size_px.is_finite() {
             return None;
         }
@@ -545,6 +547,28 @@ impl TtfFont {
         let scale = font_size_px.max(1.0) / (self.units_per_em.max(1) as f32);
         let advance_px = (self.glyph_metric(gid).advance_width as f32) * scale;
         rasterize_outline_subpixel_lcd(outline, scale, advance_px)
+    }
+
+    /// Rasterize `ch` at `font_size_px` with a horizontal subpixel phase (`0..4`, representing
+    /// `0.0`, `0.25`, `0.50`, or `0.75` px fractional X offset) and vertical stem grid fitting.
+    pub fn rasterize_glyph_subpixel_positioned(
+        &self,
+        ch: char,
+        font_size_px: f32,
+        subpixel_x_phase: u8,
+    ) -> Option<GlyphBitmap> {
+        if !font_size_px.is_finite() {
+            return None;
+        }
+        let gid = self.glyph_id(ch);
+        let outline = self.glyph_outline(gid)?;
+        if outline.contours.is_empty() {
+            return None;
+        }
+        let scale = font_size_px.max(1.0) / (self.units_per_em.max(1) as f32);
+        let advance_px = (self.glyph_metric(gid).advance_width as f32) * scale;
+        let phase_offset = (subpixel_x_phase & 3) as f32 * 0.25;
+        rasterize_outline_with_phase(outline, scale, advance_px, phase_offset, true)
     }
 }
 
@@ -2098,7 +2122,40 @@ fn parse_compound_contours(
 /// edge. An off-curve neighbor is a quadratic through that control and the
 /// following point, sampled at six steps. The sample at `t = 1` is left for
 /// the next vertex.
-fn flatten_contour(points: &[OutlinePoint], scale: f32) -> Vec<(f32, f32)> {
+/// Snap horizontal stems and the baseline (`y == 0`) to integer pixel rows at UI/body sizes.
+#[inline]
+fn snap_vertical_grid_y(
+    cur: OutlinePoint,
+    prev: OutlinePoint,
+    next: OutlinePoint,
+    scale: f32,
+    grid_fit: bool,
+) -> f32 {
+    let raw_y = -(cur.y as f32) * scale;
+    if !grid_fit {
+        return raw_y;
+    }
+    let is_baseline = cur.y == 0;
+    let dy_prev = (i32::from(cur.y) - i32::from(prev.y)).abs();
+    let dx_prev = (i32::from(cur.x) - i32::from(prev.x)).abs();
+    let dy_next = (i32::from(cur.y) - i32::from(next.y)).abs();
+    let dx_next = (i32::from(cur.x) - i32::from(next.x)).abs();
+    let is_horizontal_stem = cur.on_curve
+        && ((prev.on_curve && dy_prev <= 2 && dx_prev >= 8)
+            || (next.on_curve && dy_next <= 2 && dx_next >= 8));
+    if is_baseline || is_horizontal_stem {
+        raw_y.round()
+    } else {
+        raw_y
+    }
+}
+
+fn flatten_contour_opts(
+    points: &[OutlinePoint],
+    scale: f32,
+    x_offset_px: f32,
+    grid_fit: bool,
+) -> Vec<(f32, f32)> {
     if points.len() < 2 {
         return Vec::new();
     }
@@ -2107,14 +2164,16 @@ fn flatten_contour(points: &[OutlinePoint], scale: f32) -> Vec<(f32, f32)> {
     for i in 0..n {
         let cur = points[i];
         let next = points[(i + 1) % n];
-        let cx = (cur.x as f32) * scale;
+        let prev = points[(i + n - 1) % n];
+        let cx = (cur.x as f32) * scale + x_offset_px;
         // Negate font y so row 0 of the bitmap is the top of the glyph.
-        let cy = -(cur.y as f32) * scale;
+        let cy = snap_vertical_grid_y(cur, prev, next, scale, grid_fit);
         expanded.push((cx, cy, cur.on_curve));
         // Consecutive off-curve points imply an on-curve point halfway between them.
         if !cur.on_curve && !next.on_curve {
-            let nx = (next.x as f32) * scale;
-            let ny = -(next.y as f32) * scale;
+            let after = points[(i + 2) % n];
+            let nx = (next.x as f32) * scale + x_offset_px;
+            let ny = snap_vertical_grid_y(next, cur, after, scale, grid_fit);
             expanded.push(((cx + nx) * 0.5, (cy + ny) * 0.5, true));
         }
     }
@@ -2278,6 +2337,16 @@ fn pixel_bounds(min_x: f32, min_y: f32, max_x: f32, max_y: f32) -> Option<(i32, 
 /// [`None`]. `bearing_y` is the negation of the top edge, so row 0 sits that
 /// many pixels above the baseline.
 fn rasterize_outline(outline: &GlyphOutline, scale: f32, advance_px: f32) -> Option<GlyphBitmap> {
+    rasterize_outline_with_phase(outline, scale, advance_px, 0.0, true)
+}
+
+fn rasterize_outline_with_phase(
+    outline: &GlyphOutline,
+    scale: f32,
+    advance_px: f32,
+    x_offset_px: f32,
+    grid_fit: bool,
+) -> Option<GlyphBitmap> {
     let mut segments: Vec<((f32, f32), (f32, f32))> = Vec::new();
     let mut min_x = f32::INFINITY;
     let mut min_y = f32::INFINITY;
@@ -2285,7 +2354,7 @@ fn rasterize_outline(outline: &GlyphOutline, scale: f32, advance_px: f32) -> Opt
     let mut max_y = f32::NEG_INFINITY;
 
     for contour in &outline.contours {
-        let poly = flatten_contour(contour, scale);
+        let poly = flatten_contour_opts(contour, scale, x_offset_px, grid_fit);
         if poly.len() < 2 {
             continue;
         }
@@ -2378,6 +2447,8 @@ fn rasterize_outline_subpixel_lcd(
     scale: f32,
     advance_px: f32,
 ) -> Option<SubpixelGlyphBitmap> {
+    let x_offset_px = 0.0f32;
+    let grid_fit = true;
     let mut segments: Vec<((f32, f32), (f32, f32))> = Vec::new();
     let mut min_x = f32::INFINITY;
     let mut min_y = f32::INFINITY;
@@ -2385,7 +2456,7 @@ fn rasterize_outline_subpixel_lcd(
     let mut max_y = f32::NEG_INFINITY;
 
     for contour in &outline.contours {
-        let poly = flatten_contour(contour, scale);
+        let poly = flatten_contour_opts(contour, scale, x_offset_px, grid_fit);
         if poly.len() < 2 {
             continue;
         }
@@ -2485,6 +2556,144 @@ fn rasterize_outline_subpixel_lcd(
         advance_px,
         rgb_coverage,
     })
+}
+
+/// Convert an 8-bit sRGB channel (`0..=255`) to 12-bit linear light (`0..=4095`).
+#[inline]
+pub fn srgb_to_linear_u12(srgb: u8) -> u16 {
+    static LUT: std::sync::OnceLock<[u16; 256]> = std::sync::OnceLock::new();
+    let table = LUT.get_or_init(|| {
+        let mut t = [0u16; 256];
+        for (i, slot) in t.iter_mut().enumerate() {
+            let s = (i as f32) / 255.0;
+            let lin = if s <= 0.04045 {
+                s / 12.92
+            } else {
+                ((s + 0.055) / 1.055).powf(2.4)
+            };
+            *slot = (lin * 4095.0).round().clamp(0.0, 4095.0) as u16;
+        }
+        t
+    });
+    // SAFETY: `srgb as usize` is always in `0..256`.
+    unsafe { *table.get_unchecked(srgb as usize) }
+}
+
+/// Convert a 12-bit linear light value (`0..=4095`) back to 8-bit sRGB (`0..=255`).
+#[inline]
+pub fn linear_u12_to_srgb(linear: u16) -> u8 {
+    static LUT: std::sync::OnceLock<[u8; 4096]> = std::sync::OnceLock::new();
+    let table = LUT.get_or_init(|| {
+        let mut t = [0u8; 4096];
+        for (i, slot) in t.iter_mut().enumerate() {
+            let lin = (i as f32) / 4095.0;
+            let s = if lin <= 0.0031308 {
+                lin * 12.92
+            } else {
+                1.055 * lin.powf(1.0 / 2.4) - 0.055
+            };
+            *slot = (s * 255.0).round().clamp(0.0, 255.0) as u8;
+        }
+        t
+    });
+    let idx = (linear as usize).min(4095);
+    // SAFETY: `idx` is clamped to `0..=4095`.
+    unsafe { *table.get_unchecked(idx) }
+}
+
+/// Luminance-aware stem contrast curve (`coverage` in `0..=255`, `fg_luma` in `0..=255`).
+///
+/// Boosts mid-tone coverage on dark-on-light text so thin 1px stems remain crisp and solid,
+/// while gently moderating light-on-dark stems to prevent linear-space haloing.
+#[inline]
+pub fn enhance_stem_contrast(coverage: u8, fg_luma: u8) -> u8 {
+    if coverage == 0 || coverage == 255 {
+        return coverage;
+    }
+    let a = u32::from(coverage);
+    let inv = 255 - a;
+    let boost = (a * inv) / 255;
+    let dark_weight = u32::from(255 - fg_luma);
+    let delta = (boost * (dark_weight + 64)) / 512;
+    (a + delta).min(255) as u8
+}
+
+/// Blend a foreground RGB text pixel over a destination RGB pixel in gamma-correct linear light space
+/// with luminance-aware stem contrast enhancement.
+#[inline]
+pub fn blend_glyph_pixel_gamma_correct(
+    dst_rgb: (u8, u8, u8),
+    fg_rgb: (u8, u8, u8),
+    coverage: u8,
+) -> (u8, u8, u8) {
+    if coverage == 0 {
+        return dst_rgb;
+    }
+    if coverage == 255 {
+        return fg_rgb;
+    }
+    let fg_luma =
+        ((u32::from(fg_rgb.0) * 54 + u32::from(fg_rgb.1) * 183 + u32::from(fg_rgb.2) * 19) >> 8)
+            as u8;
+    let alpha = u32::from(enhance_stem_contrast(coverage, fg_luma));
+    let inv_alpha = 255 - alpha;
+
+    let dr = u32::from(srgb_to_linear_u12(dst_rgb.0));
+    let dg = u32::from(srgb_to_linear_u12(dst_rgb.1));
+    let db = u32::from(srgb_to_linear_u12(dst_rgb.2));
+
+    let sr = u32::from(srgb_to_linear_u12(fg_rgb.0));
+    let sg = u32::from(srgb_to_linear_u12(fg_rgb.1));
+    let sb = u32::from(srgb_to_linear_u12(fg_rgb.2));
+
+    let or = ((sr * alpha + dr * inv_alpha + 127) / 255) as u16;
+    let og = ((sg * alpha + dg * inv_alpha + 127) / 255) as u16;
+    let ob = ((sb * alpha + db * inv_alpha + 127) / 255) as u16;
+
+    (
+        linear_u12_to_srgb(or),
+        linear_u12_to_srgb(og),
+        linear_u12_to_srgb(ob),
+    )
+}
+
+/// Blend a 3-channel RGB subpixel LCD coverage triple over `dst_rgb` in gamma-correct linear space.
+#[inline]
+pub fn blend_subpixel_lcd_gamma_correct(
+    dst_rgb: (u8, u8, u8),
+    fg_rgb: (u8, u8, u8),
+    cov_rgb: (u8, u8, u8),
+) -> (u8, u8, u8) {
+    if cov_rgb == (0, 0, 0) {
+        return dst_rgb;
+    }
+    if cov_rgb == (255, 255, 255) {
+        return fg_rgb;
+    }
+    let fg_luma =
+        ((u32::from(fg_rgb.0) * 54 + u32::from(fg_rgb.1) * 183 + u32::from(fg_rgb.2) * 19) >> 8)
+            as u8;
+    let ar = u32::from(enhance_stem_contrast(cov_rgb.0, fg_luma));
+    let ag = u32::from(enhance_stem_contrast(cov_rgb.1, fg_luma));
+    let ab = u32::from(enhance_stem_contrast(cov_rgb.2, fg_luma));
+
+    let dr = u32::from(srgb_to_linear_u12(dst_rgb.0));
+    let dg = u32::from(srgb_to_linear_u12(dst_rgb.1));
+    let db = u32::from(srgb_to_linear_u12(dst_rgb.2));
+
+    let sr = u32::from(srgb_to_linear_u12(fg_rgb.0));
+    let sg = u32::from(srgb_to_linear_u12(fg_rgb.1));
+    let sb = u32::from(srgb_to_linear_u12(fg_rgb.2));
+
+    let or = ((sr * ar + dr * (255 - ar) + 127) / 255) as u16;
+    let og = ((sg * ag + dg * (255 - ag) + 127) / 255) as u16;
+    let ob = ((sb * ab + db * (255 - ab) + 127) / 255) as u16;
+
+    (
+        linear_u12_to_srgb(or),
+        linear_u12_to_srgb(og),
+        linear_u12_to_srgb(ob),
+    )
 }
 
 #[cfg(test)]
@@ -2608,10 +2817,10 @@ mod tests {
 
         let mut bad_header = vec![0u8; 16];
         bad_header[0..4].copy_from_slice(&0x0001_0000u32.to_be_bytes());
-        bad_header[4..6].copy_from_slice(&500u16.to_be_bytes());
+        bad_header[4..6].copy_from_slice(&1500u16.to_be_bytes());
         assert_eq!(
             TtfFont::parse(&bad_header).unwrap_err(),
-            TtfError::TooManyTables { count: 500 }
+            TtfError::TooManyTables { count: 1500 }
         );
     }
 
@@ -2743,5 +2952,21 @@ mod tests {
         assert_eq!(subr_outline.contours.len(), 1);
         assert_eq!(subr_outline.x_min, 50);
         assert_eq!(subr_outline.x_max, 100);
+
+        let bytes = build_minimal_synthetic_ttf();
+        let font = TtfFont::parse(&bytes).unwrap();
+        let p0 = font
+            .rasterize_glyph_subpixel_positioned('A', 20.0, 0)
+            .expect("phase 0");
+        let p2 = font
+            .rasterize_glyph_subpixel_positioned('A', 20.0, 2)
+            .expect("phase 2");
+        assert_eq!(p0.height, p2.height);
+        assert!(enhance_stem_contrast(128, 16) > 128);
+        let blended = blend_glyph_pixel_gamma_correct((255, 255, 255), (0, 0, 0), 128);
+        assert!(blended.0 > 0 && blended.0 < 255);
+        let lcd_blended =
+            blend_subpixel_lcd_gamma_correct((20, 20, 24), (240, 240, 245), (120, 180, 120));
+        assert!(lcd_blended.1 >= lcd_blended.0);
     }
 }

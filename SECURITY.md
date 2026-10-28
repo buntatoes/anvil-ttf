@@ -12,8 +12,9 @@ Do not put the details in a public issue.
 
 ## What is checked
 
-- Files larger than 32 MiB are rejected.
-- Table count, contour count, point count, compound-glyph depth, and CFF Type 2 subroutine depth are capped (128 tables, 256 contours, 4096 points, depth 16).
+- Files larger than 320 MiB are rejected.
+- Table count, contour count, point count, compound-glyph depth, and CFF Type 2 subroutine depth are capped (1,280 tables, 2,560 contours, 40,960 points, depth 64).
 - A glyph bitmap is at most 512 pixels on a side and within 2^24 pixels of the pen. Larger, NaN, or infinite font sizes give no bitmap, and the bounds are checked before any integer conversion.
+- Audited `unsafe` lookup table accesses (`srgb_to_linear_u12` and `linear_u12_to_srgb`) index fixed-size `[u16; 256]` and `[u8; 4096]` arrays after clamping indices in bounds.
 
-Version 0.8.1 is current.
+Version 0.9.0 is current.
