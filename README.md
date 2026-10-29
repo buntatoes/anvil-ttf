@@ -49,7 +49,7 @@ The browser is [anvil-browser](https://github.com/buntatoes/anvil-browser) and t
 | [anvil-css](https://github.com/buntatoes/anvil-css) | CSS Syntax Level 3 tokenizer, Selectors Level 4 matcher, and property/media/@supports parser |
 | [anvil-hpack](https://github.com/buntatoes/anvil-hpack) | HPACK header compression for HTTP/2 |
 | [anvil-image](https://github.com/buntatoes/anvil-image) | PNG, JPEG, GIF, WebP (`VP8L` + `VP8 `), ICO, BMP, PPM |
-| [anvil-js](https://github.com/buntatoes/anvil-js) | Self-hosted ES2022+ JavaScript compiler and Core JS Web/DOM runtime for `AnvilVM` |
+| [anvil-js](https://github.com/buntatoes/anvil-js) | Register-bytecode JavaScript VM, mark-sweep GC, ES2022–ES2024 stdlib, and self-hosted Core JS compiler/DOM runtime |
 | [anvil-json](https://github.com/buntatoes/anvil-json) | JSON |
 | [anvil-pqc](https://github.com/buntatoes/anvil-pqc) | ML-KEM-768, X25519, X25519MLKEM768, SHA-3 |
 | [anvil-ttf](https://github.com/buntatoes/anvil-ttf) | TrueType and OpenType (`glyf`, `CFF `, `kern`, `GPOS`) |
