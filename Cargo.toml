@@ -1,7 +1,9 @@
-# SFNT parser, glyph outlines, and an 8-bit coverage rasterizer.
-# Callers: anvil-layout (text measurement) and anvil-raster (Linux glyphs when
-# a system .ttf is found). Both crates are in anvil-engine.
-# No hinting and no GPU atlas upload.
+# SFNT (.ttf / .otf) parser, glyph outlines (glyf and CFF), kerning (kern and
+# GPOS PairPos), vertical grid fitting, 4x4 coverage rasterizer, bold/italic
+# synthesis, and linear-space alpha blending.
+# Callers: anvil-layout (proportional text measurement) and anvil-raster
+# (Linux and Windows glyphs when a system .ttf/.otf is found). Both crates are
+# in anvil-engine. No bytecode hinting and no GPU atlas upload.
 
 [package]
 name = "anvil-ttf"

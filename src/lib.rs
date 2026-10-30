@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: LicenseRef-PolyForm-Noncommercial-1.0.0-OR-Commercial
 // Copyright (c) 2026 Buntato
-//! TrueType and OpenType SFNT parser, glyph outlines, and an 8-bit coverage rasterizer.
+//! TrueType and OpenType SFNT parser, glyph outlines (`glyf` and `CFF `), and an 8-bit coverage rasterizer.
 //!
 //! Tables read from the font are `name`, `head`, `hhea`, `maxp`, `cmap`, `hmtx`,
 //! optional `kern` format 0, optional OpenType `GPOS` Lookup Type 2 (`PairPosFormat1`
-//! and `PairPosFormat2`), and optional `loca` plus `glyf`. Multi-byte values
+//! and `PairPosFormat2`), optional `loca` plus `glyf`, and optional `CFF `
+//! (Compact Font Format v1 Type 2 charstrings). Multi-byte values
 //! and directory offsets are big-endian. Character codes become glyph indices
 //! through cmap format 4 (Unicode BMP segments) and format 12 (UCS-4 groups).
 //! Other cmap formats are ignored. `head.unitsPerEm` is the design-unit size of
@@ -14,35 +15,42 @@
 //! Compound glyphs follow component indices, apply an XY offset when the
 //! argument flags say the arguments are offsets, and stop past
 //! [`MAX_COMPOSITE_GLYPH_DEPTH`]. Scales on compound components are not applied.
-//! Off-curve points are flattened to a polygon. The polygon is filled with a
-//! nonzero winding rule and 4 by 4 samples per pixel. Each bitmap byte is
-//! coverage from 0 (empty) to 255 (solid), row 0 at the top. Font y grows up
-//! and is negated before the scan, so increasing the row index moves down.
+//! `CFF ` glyphs decode Type 2 charstring stems, moves, lines, cubic Bézier curves,
+//! and local/global subroutines into flattened contours. Off-curve quadratic and
+//! cubic points are flattened to a polygon, vertical stems are lightly snapped
+//! toward pixel grid lines at small sizes, and the polygon is filled with a
+//! nonzero winding rule and 4 by 4 samples per pixel (plus 4 horizontal subpixel
+//! phase offsets, stem contrast enhancement, synthetic bold/oblique helpers, and
+//! gamma-correct linear-space alpha blending in [`blend_alpha_linear`]). Each
+//! bitmap byte is coverage from 0 (empty) to 255 (solid), row 0 at the top. Font
+//! y grows up and is negated before the scan, so increasing the row index moves down.
 //!
-//! anvil-layout uses the metric helpers to measure text. anvil-raster on Linux
-//! calls [`TtfFont::parse`] when a system `.ttf` is found, then
-//! [`TtfFont::rasterize_glyph`]. If that fails, the browser draws a built-in
-//! bitmap font instead. This crate does not shape complex scripts, hint
-//! outlines, decode CFF glyphs, or use a GPU.
+//! `anvil-layout` uses the metric helpers to measure proportional text.
+//! `anvil-raster` on Linux and Windows calls [`TtfFont::parse`] when a system
+//! `.ttf` or `.otf` is found, then rasterizes and caches glyphs across sans,
+//! serif, and monospace [`FontFamilySlot`] slots. If no system font parses,
+//! the browser falls back to Win32 GDI on Windows or the built-in 5x7 bitmap font.
+//! This crate does not shape complex scripts, run TrueType bytecode instructions,
+//! or use a GPU.
 //!
 //! File size, table count, contour count, and compound-glyph depth are capped.
 
 use std::collections::HashMap;
 use std::fmt;
 
-/// Maximum font binary size accepted (`32 MiB`).
+/// Maximum font binary size accepted (`320 MiB`).
 pub const MAX_FONT_BYTES: usize = 320 * 1024 * 1024;
 
-/// Maximum number of SFNT directory tables accepted (`128`).
+/// Maximum number of SFNT directory tables accepted (`1,280`).
 pub const MAX_SFNT_TABLES: usize = 1280;
 
-/// Maximum contours per glyph outline (`256`).
+/// Maximum contours per glyph outline (`2,560`).
 pub const MAX_GLYPH_CONTOURS: usize = 2560;
 
-/// Maximum control points per glyph outline (`4,096`).
+/// Maximum control points per glyph outline (`40,960`).
 pub const MAX_CONTOUR_POINTS: usize = 40960;
 
-/// Maximum compound glyph recursion depth (`16`).
+/// Maximum compound glyph recursion depth (`64`).
 pub const MAX_COMPOSITE_GLYPH_DEPTH: u8 = 64;
 
 /// Failure while reading an SFNT font.
