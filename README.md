@@ -1,8 +1,8 @@
 <div align="center">
   <h1>Anvil TTF</h1>
-  <p>TrueType and OpenType, drawn to coverage bitmaps with vertical grid fitting and gamma-correct linear blending.</p>
+  <p>TrueType and OpenType, drawn to coverage bitmaps with vertical grid fitting, multi-family slots, and gamma-correct linear blending.</p>
   <p>
-    <img src="https://img.shields.io/badge/release-v.09-e8c37a?style=flat-square" alt="v.09" />
+    <img src="https://img.shields.io/badge/release-v.10-e8c37a?style=flat-square" alt="v.10" />
     <img src="https://img.shields.io/badge/status-Proof_of_Concept-d4a359?style=flat-square" alt="Proof of Concept" />
     <a href="./LICENSE"><img src="https://img.shields.io/badge/license-PolyForm_Noncommercial_1.0.0_%7C_Paid_Commercial_%28Non--Compete%29-blue?style=flat-square" alt="PolyForm Noncommercial 1.0.0 | Paid Commercial (Non-Compete)" /></a>
     <a href="./SECURITY.md"><img src="https://img.shields.io/badge/security-policy-2ea44f?style=flat-square" alt="Security" /></a>
@@ -10,7 +10,7 @@
   </p>
 </div>
 
-Version 0.9.0 (`v.09`).
+Version 0.10.0 (`v.10`).
 
 The browser uses `TtfFont::parse` on Linux and Windows when a system `.ttf` is installed. If parsing fails, text falls back to a built-in bitmap font in `anvil-raster`.
 
@@ -18,6 +18,7 @@ The browser uses `TtfFont::parse` on Linux and Windows when a system `.ttf` is i
 
 - `TtfFont::parse` reads an SFNT file: `name`, `head`, `hhea`, `maxp`, `cmap` (formats 4 and 12), `hmtx`, `kern` format 0, `GPOS` pair kerning (Lookup Type 2), `loca` + `glyf`, and `CFF ` outlines.
 - Simple, compound, and `CFF ` Type 2 glyph outlines (including `callsubr` and `callgsubr` subroutines) are decoded. Compound glyphs stop at depth 64.
+- `FontFamilySlot` (`Sans`, `Serif`, `Mono`, `SansBold`, `SansItalic`), `load_system_font_slot`, and `rasterize_glyph_styled` load family-specific system fonts and synthesize bold horizontal stem dilation and 12-degree italic shear when dedicated faces are unavailable.
 - `rasterize_glyph` and `rasterize_glyph_subpixel_positioned` return 8-bit grayscale coverage bitmaps with vertical stem grid fitting (snapping baselines and horizontal stems to integer pixel rows). `rasterize_glyph_subpixel_lcd` returns a 3x horizontal RGB subpixel coverage bitmap.
 - `srgb_to_linear_u12`, `linear_u12_to_srgb`, `enhance_stem_contrast`, `blend_glyph_pixel_gamma_correct`, and `blend_subpixel_lcd_gamma_correct` perform luminance-aware stem contrast enhancement and gamma-correct linear-space alpha blending.
 - `measure_text` and `glyph_advance_px` return widths, including kerning when the font has it.

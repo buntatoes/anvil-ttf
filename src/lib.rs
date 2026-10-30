@@ -104,6 +104,25 @@ pub struct HMetric {
     pub left_side_bearing: i16,
 }
 
+/// Standard generic font family and style slots loaded by the browser.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum FontFamilySlot {
+    /// Proportional sans-serif regular (`Segoe UI` / `DejaVu Sans`).
+    SansRegular,
+    /// Proportional sans-serif bold (`Segoe UI Bold` / `DejaVu Sans Bold`).
+    SansBold,
+    /// Proportional sans-serif italic (`Segoe UI Italic` / `DejaVu Sans Oblique`).
+    SansItalic,
+    /// Proportional serif regular (`Georgia` / `Times New Roman` / `DejaVu Serif`).
+    SerifRegular,
+    /// Proportional serif bold (`Georgia Bold` / `Times New Roman Bold` / `DejaVu Serif Bold`).
+    SerifBold,
+    /// Fixed-width monospace regular (`Consolas` / `DejaVu Sans Mono`).
+    MonospaceRegular,
+    /// Fixed-width monospace bold (`Consolas Bold` / `DejaVu Sans Mono Bold`).
+    MonospaceBold,
+}
+
 /// Curve order for an outline point when flattening quadratic or cubic Bezier contours.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CurveOrder {
@@ -415,6 +434,84 @@ impl TtfFont {
         Self::parse(&bytes).ok()
     }
 
+    /// Load a specific [`FontFamilySlot`] from the host operating system's standard font directories.
+    pub fn load_system_font_slot(slot: FontFamilySlot) -> Option<Self> {
+        let win_candidates: &[&str] = match slot {
+            FontFamilySlot::SansRegular => &["segoeui.ttf", "arial.ttf"],
+            FontFamilySlot::SansBold => &["segoeuib.ttf", "arialbd.ttf", "segoeui.ttf"],
+            FontFamilySlot::SansItalic => &["segoeuii.ttf", "ariali.ttf", "segoeui.ttf"],
+            FontFamilySlot::SerifRegular => &["georgia.ttf", "times.ttf", "segoeui.ttf"],
+            FontFamilySlot::SerifBold => {
+                &["georgiab.ttf", "timesbd.ttf", "georgia.ttf", "segoeuib.ttf"]
+            }
+            FontFamilySlot::MonospaceRegular => &["consola.ttf", "cour.ttf", "segoeui.ttf"],
+            FontFamilySlot::MonospaceBold => {
+                &["consolab.ttf", "courbd.ttf", "consola.ttf", "segoeuib.ttf"]
+            }
+        };
+        if let Some(windir) = std::env::var_os("WINDIR") {
+            let fonts_dir = std::path::PathBuf::from(windir).join("Fonts");
+            for name in win_candidates {
+                if let Ok(bytes) = std::fs::read(fonts_dir.join(name))
+                    && let Ok(font) = Self::parse(&bytes)
+                {
+                    return Some(font);
+                }
+            }
+        }
+        let unix_candidates: &[&str] = match slot {
+            FontFamilySlot::SansRegular => &[
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                "/usr/share/fonts/TTF/DejaVuSans.ttf",
+                "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+            ],
+            FontFamilySlot::SansBold => &[
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
+                "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            ],
+            FontFamilySlot::SansItalic => &[
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Oblique.ttf",
+                "/usr/share/fonts/TTF/DejaVuSans-Oblique.ttf",
+                "/usr/share/fonts/truetype/liberation/LiberationSans-Italic.ttf",
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            ],
+            FontFamilySlot::SerifRegular => &[
+                "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
+                "/usr/share/fonts/TTF/DejaVuSerif.ttf",
+                "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf",
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            ],
+            FontFamilySlot::SerifBold => &[
+                "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf",
+                "/usr/share/fonts/TTF/DejaVuSerif-Bold.ttf",
+                "/usr/share/fonts/truetype/liberation/LiberationSerif-Bold.ttf",
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            ],
+            FontFamilySlot::MonospaceRegular => &[
+                "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+                "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
+                "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            ],
+            FontFamilySlot::MonospaceBold => &[
+                "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
+                "/usr/share/fonts/TTF/DejaVuSansMono-Bold.ttf",
+                "/usr/share/fonts/truetype/liberation/LiberationMono-Bold.ttf",
+                "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+            ],
+        };
+        for path in unix_candidates {
+            if let Ok(bytes) = std::fs::read(path)
+                && let Ok(font) = Self::parse(&bytes)
+            {
+                return Some(font);
+            }
+        }
+        None
+    }
+
     /// Glyph index for the Unicode scalar value `ch`.
     ///
     /// The index comes from cmap format 4 or 12. A code that is missing, or
@@ -569,6 +666,73 @@ impl TtfFont {
         let advance_px = (self.glyph_metric(gid).advance_width as f32) * scale;
         let phase_offset = (subpixel_x_phase & 3) as f32 * 0.25;
         rasterize_outline_with_phase(outline, scale, advance_px, phase_offset, true)
+    }
+
+    /// Rasterize `ch` at `font_size_px` with horizontal subpixel phase (`0..4`), optional
+    /// synthetic stem emboldening (`synthetic_bold`), and optional `0.20` oblique shear (`synthetic_italic`).
+    pub fn rasterize_glyph_styled(
+        &self,
+        ch: char,
+        font_size_px: f32,
+        subpixel_x_phase: u8,
+        synthetic_bold: bool,
+        synthetic_italic: bool,
+    ) -> Option<GlyphBitmap> {
+        if !font_size_px.is_finite() {
+            return None;
+        }
+        let gid = self.glyph_id(ch);
+        let outline = self.glyph_outline(gid)?;
+        if outline.contours.is_empty() {
+            return None;
+        }
+        let scale = font_size_px.max(1.0) / (self.units_per_em.max(1) as f32);
+        let advance_px = (self.glyph_metric(gid).advance_width as f32) * scale;
+        let phase_offset = (subpixel_x_phase & 3) as f32 * 0.25;
+        let effective_outline: std::borrow::Cow<'_, GlyphOutline> = if synthetic_italic {
+            let mut sheared = outline.clone();
+            for contour in &mut sheared.contours {
+                for pt in contour {
+                    let slant = ((pt.y as f32) * 0.20).round() as i16;
+                    pt.x = pt.x.saturating_add(slant);
+                }
+            }
+            std::borrow::Cow::Owned(sheared)
+        } else {
+            std::borrow::Cow::Borrowed(outline)
+        };
+        let mut bmp = rasterize_outline_with_phase(
+            &effective_outline,
+            scale,
+            advance_px,
+            phase_offset,
+            true,
+        )?;
+        if synthetic_bold && bmp.width > 0 && bmp.height > 0 && bmp.width < 511 {
+            let old_w = bmp.width as usize;
+            let new_w = old_w + 1;
+            let h = bmp.height as usize;
+            let mut bold_cov = vec![0u8; new_w * h];
+            for row in 0..h {
+                for col in 0..new_w {
+                    let c0 = if col < old_w {
+                        bmp.coverage[row * old_w + col]
+                    } else {
+                        0
+                    };
+                    let c1 = if col > 0 {
+                        ((u16::from(bmp.coverage[row * old_w + (col - 1)]) * 210) / 255) as u8
+                    } else {
+                        0
+                    };
+                    bold_cov[row * new_w + col] = c0.max(c1);
+                }
+            }
+            bmp.width = new_w as u32;
+            bmp.advance_px += (font_size_px * 0.04).max(0.5);
+            bmp.coverage = bold_cov;
+        }
+        Some(bmp)
     }
 }
 
@@ -2968,5 +3132,16 @@ mod tests {
         let lcd_blended =
             blend_subpixel_lcd_gamma_correct((20, 20, 24), (240, 240, 245), (120, 180, 120));
         assert!(lcd_blended.1 >= lcd_blended.0);
+
+        let bold_bmp = font
+            .rasterize_glyph_styled('A', 20.0, 0, true, false)
+            .expect("synthetic bold");
+        assert_eq!(bold_bmp.width, p0.width + 1);
+        assert!(bold_bmp.advance_px > p0.advance_px);
+        let italic_bmp = font
+            .rasterize_glyph_styled('A', 20.0, 0, false, true)
+            .expect("synthetic italic");
+        assert!(italic_bmp.width >= p0.width);
+        let _ = TtfFont::load_system_font_slot(FontFamilySlot::SansRegular);
     }
 }
