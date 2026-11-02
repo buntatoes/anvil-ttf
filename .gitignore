@@ -1,3 +1,10 @@
+# Binaries and build outputs
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+/bin/
+/dist/
 /target
-Cargo.lock
-.vs

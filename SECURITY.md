@@ -8,9 +8,11 @@ Do not put the details in a public issue.
 
 ## What is checked
 
-- Files larger than 320 MiB are rejected.
-- Table count, contour count, point count, compound-glyph depth, and CFF Type 2 subroutine depth are capped (1,280 tables, 2,560 contours, 40,960 points, depth 64).
-- A glyph bitmap is at most 512 pixels on a side and within 2^24 pixels of the pen. Larger, NaN, or infinite font sizes give no bitmap, and the bounds are checked before any integer conversion.
-- Audited `unsafe` lookup table accesses (`srgb_to_linear_u12` and `linear_u12_to_srgb`) index fixed-size `[u16; 256]` and `[u8; 4096]` arrays after clamping indices in bounds.
+- Font files larger than 320 MiB (`MaxFontBytes`) are rejected immediately.
+- SFNT table directories with more than 1,280 table records (`MaxSfntTables`) are rejected before table bodies are parsed.
+- Glyphs with more than 2,560 contours (`MaxGlyphContours`) or more than 40,960 control points (`MaxContourPoints`) are rejected to prevent memory exhaustion attacks.
+- Composite glyph recursion is strictly capped at depth 64 (`MaxCompositeGlyphDepth`) to eliminate infinite recursion and stack overflows on self-referential fonts.
+- Rasterized glyph dimensions are capped at 512x512 pixels (`MaxGlyphBitmapSide`), and coordinates are bounded to within 2^24 pixels of the pen (`MaxGlyphOffset`).
+- CFF Type 2 CharString programs enforce operand stack limits (48 numbers) and subroutine call stack limits (16 frames).
 
-Version 0.10.0 is current.
+Version 0.11.0 (`v.11`) is current.
