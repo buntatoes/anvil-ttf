@@ -33,8 +33,8 @@ The browser uses this for text measurement and glyph rasterization. Written 100%
   - `loca` & `glyf`: TrueType outlines with simple contour decoding and compound composite glyphs with 2x2 affine matrix transformations.
   - `CFF `: Compact Font Format v1 container, Top DICT, Private DICT, Local/Global Subroutines (biases 107, 1131, 32768), and Type 2 CharString bytecode interpreter with all curve operators, stem hints, and hintmasks.
 - **Geometry & Curve Flattening**:
-  - Quadratic Bézier subdivision into linear polygon vertices.
-  - Cubic Bézier subdivision into linear polygon vertices.
+  - Quadratic Bezier subdivision into linear polygon vertices.
+  - Cubic Bezier subdivision into linear polygon vertices.
   - Contour flattening with implicit midpoint synthesis between consecutive off-curve points.
 - **Rasterization & Styling**:
   - 4x4 supersampled coverage rasterizer (16 samples per pixel) with non-zero winding rule.
@@ -42,7 +42,7 @@ The browser uses this for text measurement and glyph rasterization. Written 100%
   - Vertical stem grid fitting (`snapVerticalGridY`) to snap baselines and horizontal crossbars to whole pixel rows at small sizes.
   - Horizontal subpixel phase positioning (4 quarter-pixel bins: 0.00px, 0.25px, 0.50px, 0.75px).
   - Synthetic bold (1px horizontal dilation + pen advance expansion) and synthetic italic (0.20 oblique shear).
-  - Gamma-correct sRGB $\leftrightarrow$ 12-bit linear light LUT conversions and luminance-aware stem contrast enhancement.
+  - Gamma-correct sRGB <-> 12-bit linear light LUT conversions and luminance-aware stem contrast enhancement.
 - **CLI & Worker**:
   - Persistent binary IPC worker over standard I/O (`cmd/anvil-ttf --worker`) with 1-byte opcodes.
   - Inspection mode (`--inspect <font.ttf>`) and Netpbm PGM rendering (`--render <font> <char> <size> <out.pgm>`).
